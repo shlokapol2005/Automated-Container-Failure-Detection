@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+# Flask DevOps Mini Project - Local Deployment
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  flask-app:
+    # Use the image built and pushed by GitHub Actions CI/CD pipeline.
+    # Replace <your-dockerhub-username> with your actual Docker Hub username.
+    # The image is built from the Dockerfile in the project root.
+    image: ${DOCKER_IMAGE:-flask-devops-app:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flask-devops-app
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - FLASK_DEBUG=false
+    # Docker-native health check — Docker itself monitors this and marks the
+    # container healthy/unhealthy.  The monitoring script uses this as a
+    # secondary signal; it primarily calls /health directly.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - devops-network
+
+networks:
+  devops-network:
+    driver: bridge
