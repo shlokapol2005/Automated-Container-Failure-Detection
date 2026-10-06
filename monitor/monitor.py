@@ -9,10 +9,15 @@ DevOps Mini Project
 WHAT THIS SCRIPT DOES:
   1. Periodically calls GET /health on the Flask container
   2. If HEALTHY  → logs OK, continues watching
-  3. If UNHEALTHY → logs failure, restarts the container, waits for recovery,
-                    confirms health restored, sends Discord notification
+  3. If UNHEALTHY (2 consecutive) →
+       a. Sends Discord "failure detected" alert
+       b. Issues `docker restart <container>`
+       c. Polls recovery (every 5s, up to RECOVERY_TIMEOUT)
+       d. Sends Discord "recovered" alert with recovery time
+       e. If restarts this session >= MAX_RESTARTS → sends escalation alert
+  4. Tracks total restarts per session to detect persistent failures
 
-ENVIRONMENT VARIABLES (set in .env or your shell):
+ENVIRONMENT VARIABLES (set in .env or docker-compose environment):
   DISCORD_WEBHOOK_URL  – Discord Incoming Webhook URL (required for alerts)
   HEALTH_URL           – Full URL of the /health endpoint
                          (default: http://localhost:5000/health)
@@ -20,9 +25,14 @@ ENVIRONMENT VARIABLES (set in .env or your shell):
                          (default: flask-devops-app)
   CHECK_INTERVAL       – Seconds between health checks (default: 10)
   RECOVERY_TIMEOUT     – Max seconds to wait for recovery (default: 60)
+  MAX_RESTARTS         – Restarts before escalation alert (default: 5)
 
 USAGE:
-  python monitor.py
+  # On host:
+  python monitor/monitor.py
+
+  # Via Docker Compose (recommended):
+  docker compose up -d
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -45,6 +55,14 @@ HEALTH_URL          = os.environ.get("HEALTH_URL", "http://localhost:5000/health
 CONTAINER_NAME      = os.environ.get("CONTAINER_NAME", "flask-devops-app")
 CHECK_INTERVAL      = int(os.environ.get("CHECK_INTERVAL", "10"))
 RECOVERY_TIMEOUT    = int(os.environ.get("RECOVERY_TIMEOUT", "60"))
+MAX_RESTARTS        = int(os.environ.get("MAX_RESTARTS", "5"))
+
+
+# ─────────────────────────────────────────────
+# Session state
+# ─────────────────────────────────────────────
+
+_session_restart_count = 0   # Total restarts issued in this monitoring session
 
 
 # ─────────────────────────────────────────────
@@ -67,15 +85,14 @@ def log(level: str, message: str) -> None:
 
 def send_discord_notification(title: str, description: str, color: int) -> None:
     """
-    Send a message to Discord via webhook.
-    Sends both a plain content line and a rich embed for maximum compatibility.
-    color: Discord embed color as integer  (e.g. 0xFF0000 = red, 0x00FF00 = green)
+    Send a rich embed message to Discord via webhook.
+    color: Discord embed color integer (e.g. 0xFF0000 = red, 0x00FF00 = green)
     """
     if not DISCORD_WEBHOOK_URL:
         log("WARN", "DISCORD_WEBHOOK_URL not set — skipping Discord notification")
         return
 
-    color_label = {0xFF0000: "🔴", 0x00FF00: "🟢", 0xFF6600: "🟠"}.get(color, "🔵")
+    color_label = {0xFF0000: "🔴", 0x00FF00: "🟢", 0xFF6600: "🟠", 0xFF0066: "🆘"}.get(color, "🔵")
 
     payload = json.dumps({
         "content": f"{color_label} **{title}**\n{description}\n_Container: `{CONTAINER_NAME}` • {timestamp()}_",
@@ -117,10 +134,10 @@ def check_health() -> dict:
     """
     Call the /health endpoint.
     Returns a dict with keys:
-      - healthy (bool)
-      - status  (str)   "HEALTHY" | "UNHEALTHY" | "UNREACHABLE"
+      - healthy   (bool)
+      - status    (str)   "HEALTHY" | "UNHEALTHY" | "UNREACHABLE"
       - http_code (int | None)
-      - body  (dict | None)
+      - body      (dict | None)
     """
     try:
         req = urllib.request.Request(HEALTH_URL, method="GET")
@@ -152,6 +169,8 @@ def restart_container(name: str) -> bool:
     """
     Restart the named Docker container.
     Returns True if the docker restart command succeeded.
+    When running inside a container, this works via the mounted Docker socket
+    (/var/run/docker.sock) which gives access to the host Docker daemon.
     """
     log("ACTION", f"Restarting container '{name}' ...")
     result = subprocess.run(
@@ -192,9 +211,13 @@ def wait_for_recovery(timeout: int) -> bool:
 def handle_failure(result: dict) -> None:
     """
     Full failure → restart → recovery → notification flow.
+    Tracks restarts per session and sends escalation if threshold is exceeded.
     """
+    global _session_restart_count
+
     http_code = result.get("http_code")
     api_status = result.get("status")
+    failure_detected_at = time.time()
 
     log("ERROR", f"FAILURE DETECTED — HTTP {http_code} | status={api_status}")
 
@@ -226,19 +249,24 @@ def handle_failure(result: dict) -> None:
         )
         return
 
+    _session_restart_count += 1
+    log("INFO", f"Session restart count: {_session_restart_count} / {MAX_RESTARTS}")
+
     # Step 3: Wait for recovery
     recovered = wait_for_recovery(RECOVERY_TIMEOUT)
+    recovery_time = round(time.time() - failure_detected_at, 1)
 
     if recovered:
-        log("OK", "Service has RECOVERED successfully ✅")
+        log("OK", f"Service has RECOVERED successfully ✅ (took {recovery_time}s)")
         send_discord_notification(
             title="✅ Service Recovered Successfully",
             description=(
                 f"**Container:** `{CONTAINER_NAME}`\n"
-                f"**Health URL:** `{HEALTH_URL}`\n\n"
+                f"**Health URL:** `{HEALTH_URL}`\n"
+                f"**Recovery time:** `{recovery_time}s` from failure detection to HEALTHY\n\n"
                 "The container was automatically restarted and the service "
                 "is now responding **HEALTHY**.\n\n"
-                "_Monitoring continues ..._"
+                f"_Session restarts: {_session_restart_count} / {MAX_RESTARTS} — Monitoring continues ..._"
             ),
             color=0x00FF00  # Green
         )
@@ -255,6 +283,22 @@ def handle_failure(result: dict) -> None:
             color=0xFF6600  # Orange
         )
 
+    # Step 4: Escalation check — warn if container keeps failing repeatedly
+    if _session_restart_count >= MAX_RESTARTS:
+        log("ERROR", f"ESCALATION: Container has been restarted {_session_restart_count} times this session")
+        send_discord_notification(
+            title="🆘 Repeated Failure — Escalation",
+            description=(
+                f"**Container:** `{CONTAINER_NAME}`\n"
+                f"This container has been automatically restarted **{_session_restart_count} times** "
+                "in this monitoring session.\n\n"
+                "This indicates a **persistent failure**, not a transient one.\n"
+                "**Immediate manual investigation is required.**\n\n"
+                "_The monitor will continue watching but this is a critical alert._"
+            ),
+            color=0xFF0066  # Magenta/red
+        )
+
 
 # ─────────────────────────────────────────────
 # Main monitoring loop
@@ -265,11 +309,12 @@ def main() -> None:
     print("  DevOps Health Monitor")
     print("  Automated Container Failure Detection & Self-Recovery")
     print("=" * 65)
-    log("INFO", f"Health URL      : {HEALTH_URL}")
-    log("INFO", f"Container name  : {CONTAINER_NAME}")
-    log("INFO", f"Check interval  : {CHECK_INTERVAL}s")
-    log("INFO", f"Recovery timeout: {RECOVERY_TIMEOUT}s")
-    log("INFO", f"Discord alerts  : {'ENABLED' if DISCORD_WEBHOOK_URL else 'DISABLED (set DISCORD_WEBHOOK_URL)'}")
+    log("INFO", f"Health URL       : {HEALTH_URL}")
+    log("INFO", f"Container name   : {CONTAINER_NAME}")
+    log("INFO", f"Check interval   : {CHECK_INTERVAL}s")
+    log("INFO", f"Recovery timeout : {RECOVERY_TIMEOUT}s")
+    log("INFO", f"Max restarts     : {MAX_RESTARTS} (escalation threshold)")
+    log("INFO", f"Discord alerts   : {'ENABLED' if DISCORD_WEBHOOK_URL else 'DISABLED (set DISCORD_WEBHOOK_URL)'}")
     print("=" * 65)
     print()
 
@@ -287,7 +332,7 @@ def main() -> None:
             log("WARN", f"Check #{consecutive_failures}: {result['status']} — HTTP {result['http_code']}")
 
             if consecutive_failures >= 2:
-                # Two consecutive failures → trigger recovery
+                # Two consecutive failures → trigger recovery flow
                 handle_failure(result)
                 consecutive_failures = 0
 

@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# prometheus/prometheus.yml
+# Prometheus scrape configuration
+#
+# Prometheus scrapes the Flask /metrics endpoint every 15 seconds.
+# Data is then queried by Grafana to render the monitoring dashboard.
+# ─────────────────────────────────────────────────────────────────────────────
+
+global:
+  scrape_interval:     15s   # Scrape targets every 15 seconds
+  evaluation_interval: 15s   # Evaluate alerting rules every 15 seconds
+
+scrape_configs:
+  # Scrape the Flask app's Prometheus metrics endpoint
+  - job_name: "flask-devops-app"
+    static_configs:
+      - targets: ["flask-app:5000"]   # Service name resolved via Docker network
+    metrics_path: "/metrics"
+    scrape_interval: 10s              # Override: scrape every 10s for live demo
+
+  # Scrape Prometheus itself (useful for debugging)
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

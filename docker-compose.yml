@@ -1,13 +1,26 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # docker-compose.yml
-# Flask DevOps Mini Project - Local Deployment
+# Flask DevOps Mini Project — Full Observability Stack
+#
+# Services:
+#   flask-app   — The Flask REST API (port 5000)
+#   monitor     — Health monitor + auto-recovery daemon (Docker socket access)
+#   prometheus  — Metrics scraper, scrapes /metrics every 10s (port 9090)
+#   grafana     — Dashboard UI, auto-loads DevOps dashboard (port 3000)
+#
+# Start everything:
+#   docker compose up -d --build
+#
+# URLs:
+#   App:        http://localhost:5000
+#   Prometheus: http://localhost:9090
+#   Grafana:    http://localhost:3000  (admin / admin)
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
+
+  # ── Flask Application ────────────────────────────────────────────────────────
   flask-app:
-    # Use the image built and pushed by GitHub Actions CI/CD pipeline.
-    # Replace <your-dockerhub-username> with your actual Docker Hub username.
-    # The image is built from the Dockerfile in the project root.
     image: ${DOCKER_IMAGE:-flask-devops-app:local}
     build:
       context: .
@@ -18,9 +31,6 @@ services:
     environment:
       - PORT=5000
       - FLASK_DEBUG=false
-    # Docker-native health check — Docker itself monitors this and marks the
-    # container healthy/unhealthy.  The monitoring script uses this as a
-    # secondary signal; it primarily calls /health directly.
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
@@ -32,6 +42,78 @@ services:
     networks:
       - devops-network
 
+  # ── Health Monitor ────────────────────────────────────────────────────────────
+  # Runs as a sidecar container with access to the host Docker daemon via
+  # the mounted socket. Issues `docker restart flask-devops-app` on failure.
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    container_name: devops-monitor
+    environment:
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - HEALTH_URL=http://flask-app:5000/health   # Resolved via Docker network
+      - CONTAINER_NAME=flask-devops-app
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-10}
+      - RECOVERY_TIMEOUT=${RECOVERY_TIMEOUT:-60}
+      - MAX_RESTARTS=${MAX_RESTARTS:-5}
+    volumes:
+      # Mount the Docker socket so monitor can issue docker restart commands
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - flask-app
+    restart: unless-stopped
+    networks:
+      - devops-network
+
+  # ── Prometheus ────────────────────────────────────────────────────────────────
+  # Scrapes /metrics from flask-app every 10 seconds.
+  # Stores time-series data queried by Grafana.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: devops-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    depends_on:
+      - flask-app
+    restart: unless-stopped
+    networks:
+      - devops-network
+
+  # ── Grafana ───────────────────────────────────────────────────────────────────
+  # Dashboard UI. Auto-provisioned with:
+  #   - Prometheus datasource
+  #   - DevOps Monitoring Dashboard (6 panels)
+  # Login: admin / admin  (or set GRAFANA_PASSWORD in .env)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: devops-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - devops-network
+
 networks:
   devops-network:
     driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

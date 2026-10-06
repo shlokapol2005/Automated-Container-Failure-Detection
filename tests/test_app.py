@@ -162,3 +162,46 @@ class TestResetEndpoint:
         response = client.post("/reset")
         data = response.get_json()
         assert "message" in data
+
+
+# ─────────────────────────────────────────────
+# Tests for GET /metrics (Prometheus endpoint)
+# ─────────────────────────────────────────────
+
+class TestMetricsEndpoint:
+    def test_metrics_returns_200(self, client):
+        """Metrics endpoint should return HTTP 200."""
+        response = client.get("/metrics")
+        assert response.status_code == 200
+
+    def test_metrics_content_type_is_prometheus(self, client):
+        """Metrics endpoint should return Prometheus text/plain content-type."""
+        response = client.get("/metrics")
+        assert "text/plain" in response.content_type
+
+    def test_metrics_exposes_health_status_gauge(self, client):
+        """Metrics should include flask_health_status gauge."""
+        response = client.get("/metrics")
+        assert b"flask_health_status" in response.data
+
+    def test_metrics_exposes_request_counter(self, client):
+        """Metrics should include flask_requests_total counter after requests."""
+        # Make a request so the counter is non-zero
+        client.get("/")
+        response = client.get("/metrics")
+        assert b"flask_requests_total" in response.data
+
+    def test_metrics_health_status_zero_when_unhealthy(self, client):
+        """After simulate-failure, flask_health_status in /metrics should be 0."""
+        client.post("/simulate-failure")
+        client.get("/health")  # Trigger health check to update gauge
+        response = client.get("/metrics")
+        data = response.data.decode("utf-8")
+        # The line should show flask_health_status 0.0
+        assert "flask_health_status 0.0" in data
+
+    def test_metrics_uptime_gauge_present(self, client):
+        """Metrics should include flask_uptime_seconds gauge."""
+        client.get("/health")  # Trigger uptime update
+        response = client.get("/metrics")
+        assert b"flask_uptime_seconds" in response.data

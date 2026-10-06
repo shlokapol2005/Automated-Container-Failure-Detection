@@ -6,12 +6,20 @@
 # DevOps Mini Project
 #
 # PIPELINE STAGES:
-#   1. Checkout code
-#   2. Set up Python
-#   3. Install dependencies
-#   4. Run automated tests (pytest)
-#   5. Build Docker image
-#   6. Push Docker image to Docker Hub
+#   Job 1 — test:
+#     1. Checkout code
+#     2. Set up Python 3.11
+#     3. Install dependencies
+#     4. Run pytest with coverage (enforces 80% minimum)
+#     5. Integration smoke test (starts live gunicorn, hits /health via curl)
+#     6. Upload coverage report artifact
+#
+#   Job 2 — build-and-push (only runs if Job 1 passes):
+#     1. Checkout code
+#     2. Set up Docker Buildx
+#     3. Log in to Docker Hub
+#     4. Extract image metadata (tags + labels)
+#     5. Build and push image to Docker Hub (:latest + :sha-<commit>)
 #
 # REQUIRED GITHUB SECRETS:
 #   DOCKERHUB_USERNAME  – Your Docker Hub username
@@ -33,10 +41,10 @@ on:
 
 jobs:
   # ───────────────────────────────────────────
-  # JOB 1: Test
+  # JOB 1: Test + Integration Smoke Test
   # ───────────────────────────────────────────
   test:
-    name: Run Automated Tests
+    name: Run Tests & Smoke Test
     runs-on: ubuntu-latest
 
     steps:
@@ -53,12 +61,52 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt
 
-      - name: Run pytest with coverage report
+      # ── Unit tests with enforced coverage threshold ──────────────────────────
+      - name: Run pytest with coverage (min 80%)
         run: |
-          pytest tests/ -v --tb=short --cov=app --cov-report=term-missing
+          pytest tests/ -v --tb=short \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-fail-under=80
         env:
           PYTHONPATH: ${{ github.workspace }}
 
+      # ── Integration smoke test — starts the real app and hits /health ────────
+      # This proves the app actually runs as a server, not just passes unit tests.
+      - name: Start Flask app (gunicorn) for integration test
+        run: |
+          cd app
+          gunicorn --workers=1 --bind=0.0.0.0:5000 app:app &
+          echo $! > /tmp/gunicorn.pid
+          sleep 6
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Integration smoke test — verify live /health endpoint
+        run: |
+          echo "Testing root endpoint..."
+          curl -f http://localhost:5000/ || (echo "❌ Root endpoint failed" && exit 1)
+
+          echo "Testing /health endpoint..."
+          RESPONSE=$(curl -sf http://localhost:5000/health)
+          echo "Response: $RESPONSE"
+
+          echo "$RESPONSE" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert data.get('status') == 'HEALTHY', f'Expected HEALTHY, got: {data}'
+          assert 'uptime_seconds' in data, 'Missing uptime_seconds field'
+          print('✅ Smoke test passed: /health returns HEALTHY with uptime_seconds')
+          "
+
+          echo "Testing /metrics endpoint (Prometheus format)..."
+          curl -f http://localhost:5000/metrics | grep -q "flask_health_status" \
+            || (echo "❌ /metrics missing flask_health_status" && exit 1)
+          echo "✅ /metrics endpoint returning Prometheus data"
+
+          kill $(cat /tmp/gunicorn.pid) 2>/dev/null || true
+
+      # ── Upload coverage artifact ─────────────────────────────────────────────
       - name: Upload coverage report as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -68,6 +116,7 @@ jobs:
 
   # ───────────────────────────────────────────
   # JOB 2: Build and Push Docker Image
+  # (only runs after tests pass)
   # ───────────────────────────────────────────
   build-and-push:
     name: Build & Push Docker Image
@@ -107,7 +156,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify image was pushed
+      - name: Confirm image pushed to Docker Hub
         run: |
           echo "✅ Docker image pushed successfully!"
           echo "Image: ${{ secrets.DOCKERHUB_USERNAME }}/flask-devops-app:latest"

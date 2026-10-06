@@ -1,0 +1,18 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# grafana/provisioning/datasources/prometheus.yml
+# Grafana datasource provisioning — auto-configures Prometheus on startup
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: devops-prometheus          # Referenced in dashboard JSON targets
+    access: proxy
+    url: http://prometheus:9090     # Resolved via Docker network
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: "10s"
+    editable: true

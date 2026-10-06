@@ -38,4 +38,9 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=10s \
 # Run the application using Gunicorn (production-grade WSGI server)
 # - workers=2       : 2 worker processes (suitable for a small demo)
 # - bind=0.0.0.0:5000 : bind to all interfaces on port 5000
-CMD ["gunicorn", "--workers=2", "--bind=0.0.0.0:5000", "app:app"]
+# IMPORTANT: workers=1 is intentional.
+# The app uses a module-level global flag (_SIMULATE_FAILURE) to simulate failures.
+# Multiple workers do NOT share memory — each worker has its own copy of the flag,
+# so POST /simulate-failure would only affect one worker, making /health return
+# HEALTHY from other workers even after failure is triggered. workers=1 avoids this.
+CMD ["gunicorn", "--workers=1", "--bind=0.0.0.0:5000", "app:app"]

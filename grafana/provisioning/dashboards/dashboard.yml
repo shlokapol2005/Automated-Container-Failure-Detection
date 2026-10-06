@@ -1,0 +1,18 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# grafana/provisioning/dashboards/dashboard.yml
+# Grafana dashboard provisioning — auto-loads dashboards from the
+# grafana/dashboards/ directory on startup
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: 1
+
+providers:
+  - name: "DevOps Dashboards"
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

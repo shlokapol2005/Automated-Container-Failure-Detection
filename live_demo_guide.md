@@ -6,7 +6,7 @@
 ## 🗂️ What You've Built (30-second pitch)
 
 > A **Flask REST API** containerized with Docker, with:
-> - ✅ **Automated tests** (pytest, 15 test cases)
+> - ✅ **Automated tests** (pytest, 26 test cases across 5 test classes)
 > - ✅ **CI/CD pipeline** (GitHub Actions → Docker Hub)
 > - ✅ **Health monitoring** script that detects failures and **auto-restarts** the container
 > - ✅ **Discord alerts** sent on failure and recovery
@@ -20,7 +20,7 @@ Open **two terminal windows** side by side.
 ### Terminal 1 — Start the Flask container
 ```powershell
 cd "C:\Users\Shloka Pol\OneDrive\Desktop\devops-labca"
-docker-compose up --build -d
+docker compose up --build -d
 ```
 Wait ~15 seconds for the container to be healthy. Verify:
 ```powershell
@@ -115,7 +115,7 @@ The terminal output during recovery looks like:
 Open GitHub → your repo → **Actions tab**
 
 Show the pipeline stages:
-1. ✅ **Run Automated Tests** — runs all 15 pytest cases
+1. ✅ **Run Tests & Smoke Test** — runs all 26 pytest cases + live integration smoke test
 2. ✅ **Build & Push Docker Image** — only runs if tests pass, pushes to Docker Hub
 
 **What to say:**
@@ -131,21 +131,22 @@ cd "C:\Users\Shloka Pol\OneDrive\Desktop\devops-labca"
 pytest tests/ -v
 ```
 
-Output shows 15 tests across 4 classes:
+Output shows 26 tests across 5 classes:
 - `TestIndexEndpoint` (5 tests)
 - `TestHealthEndpoint` (5 tests)
 - `TestSimulateFailureEndpoint` (6 tests)
 - `TestResetEndpoint` (4 tests)
+- `TestMetricsEndpoint` (6 tests — covers Prometheus /metrics endpoint)
 
 **What to say:**
-> *"We have 15 automated test cases covering every endpoint and scenario — including the failure simulation and recovery flow. These run automatically in GitHub Actions on every push."*
+> *"We have 26 automated test cases covering every endpoint and scenario — including the failure simulation, recovery flow, and the Prometheus metrics endpoint. CI also enforces a minimum 80% code coverage threshold. These run automatically in GitHub Actions on every push."*
 
 ---
 
 ## 🧹 Step 3 — Clean Up After Demo
 
 ```powershell
-docker-compose down
+docker compose down
 ```
 
 ---
@@ -165,14 +166,17 @@ docker-compose down
 ## ⚡ Quick Commands Cheat Sheet
 
 ```powershell
-# Start everything
-docker-compose up -d
+# Start all 4 services (app + monitor + prometheus + grafana)
+docker compose up -d --build
 
-# Check container status
+# Check all containers are running
 docker ps
 
 # Check app health
 Invoke-WebRequest http://localhost:5000/health | Select-Object -ExpandProperty Content
+
+# Check Prometheus metrics
+Invoke-WebRequest http://localhost:5000/metrics | Select-Object -ExpandProperty Content
 
 # Trigger failure
 Invoke-WebRequest -Uri http://localhost:5000/simulate-failure -Method POST
@@ -183,6 +187,12 @@ Invoke-WebRequest -Uri http://localhost:5000/reset -Method POST
 # Run tests
 pytest tests/ -v
 
+# Open Grafana dashboard in browser
+Start-Process "http://localhost:3000"   # login: admin / admin
+
+# Open Prometheus in browser
+Start-Process "http://localhost:9090"
+
 # Stop everything
-docker-compose down
+docker compose down
 ```
