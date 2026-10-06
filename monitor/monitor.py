@@ -67,15 +67,18 @@ def log(level: str, message: str) -> None:
 
 def send_discord_notification(title: str, description: str, color: int) -> None:
     """
-    Send a rich embed message to Discord via webhook.
+    Send a message to Discord via webhook.
+    Sends both a plain content line and a rich embed for maximum compatibility.
     color: Discord embed color as integer  (e.g. 0xFF0000 = red, 0x00FF00 = green)
     """
     if not DISCORD_WEBHOOK_URL:
         log("WARN", "DISCORD_WEBHOOK_URL not set — skipping Discord notification")
         return
 
+    color_label = {0xFF0000: "🔴", 0x00FF00: "🟢", 0xFF6600: "🟠"}.get(color, "🔵")
+
     payload = json.dumps({
-        "username": "DevOps Monitor 🤖",
+        "content": f"{color_label} **{title}**\n{description}\n_Container: `{CONTAINER_NAME}` • {timestamp()}_",
         "embeds": [{
             "title": title,
             "description": description,
@@ -96,6 +99,12 @@ def send_discord_notification(title: str, description: str, color: int) -> None:
                 log("OK", "Discord notification sent successfully")
             else:
                 log("WARN", f"Discord returned unexpected status: {resp.status}")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8")
+        except Exception:
+            body = "(no body)"
+        log("WARN", f"Discord HTTP {exc.code}: {body}")
     except Exception as exc:
         log("WARN", f"Failed to send Discord notification: {exc}")
 
