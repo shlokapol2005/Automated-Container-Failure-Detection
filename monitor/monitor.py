@@ -168,17 +168,44 @@ def check_health() -> dict:
 def restart_container(name: str) -> bool:
     """
     Restart the named Docker container.
-    Returns True if the docker restart command succeeded.
-    When running inside a container, this works via the mounted Docker socket
-    (/var/run/docker.sock) which gives access to the host Docker daemon.
+
+    PRIMARY — Docker Python SDK (preferred when running inside a container):
+      Communicates with the Docker daemon via the mounted socket
+      (/var/run/docker.sock) using HTTP. No docker CLI binary needed.
+      This is the standard sidecar-container pattern.
+
+    FALLBACK — subprocess docker CLI (used when running monitor.py locally):
+      If the SDK is not installed (ImportError), falls back to calling
+      `docker restart <name>` as a subprocess. This works on Windows when
+      Docker Desktop is installed and docker is in PATH.
     """
     log("ACTION", f"Restarting container '{name}' ...")
+
+    # ── Primary: Docker Python SDK ─────────────────────────────────────────────
+    try:
+        import docker as docker_sdk
+        client = docker_sdk.from_env()
+        container = client.containers.get(name)
+        container.restart()
+        log("OK", f"Container '{name}' restarted successfully via Docker SDK")
+        return True
+    except ImportError:
+        # SDK not installed — fall through to subprocess fallback below
+        log("WARN", "docker SDK not available — falling back to docker CLI subprocess")
+    except docker_sdk.errors.NotFound:
+        log("ERROR", f"Container '{name}' not found — is it running?")
+        return False
+    except Exception as exc:
+        log("ERROR", f"Docker SDK restart failed: {exc}")
+        return False
+
+    # ── Fallback: subprocess docker CLI (local Windows usage) ──────────────────
     result = subprocess.run(
         ["docker", "restart", name],
         capture_output=True, text=True
     )
     if result.returncode == 0:
-        log("OK", f"Container '{name}' restart command accepted")
+        log("OK", f"Container '{name}' restarted via docker CLI")
         return True
     else:
         log("ERROR", f"docker restart failed: {result.stderr.strip()}")

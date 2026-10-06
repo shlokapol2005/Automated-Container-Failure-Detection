@@ -2,26 +2,25 @@
 # Dockerfile.monitor
 # Container image for the health monitor / auto-recovery daemon
 #
-# WHY A SEPARATE DOCKERFILE?
-#   The monitor needs the Docker CLI to issue `docker restart` commands.
-#   Mounting /var/run/docker.sock gives it access to the host Docker daemon,
-#   and installing docker.io provides the CLI binary inside the container.
-#   This pattern is commonly used for sidecar monitoring containers.
+# WHY DOCKER PYTHON SDK instead of docker CLI:
+#   The docker.io apt package is unreliable on slim Python base images and
+#   requires the full docker daemon binary stack. The Docker Python SDK
+#   (`docker` package) communicates with the Docker daemon directly via
+#   the mounted socket (/var/run/docker.sock) using HTTP — no binary needed.
+#   This is the standard, production-grade pattern for sidecar containers
+#   that need to control sibling containers.
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim
-
-# Install Docker CLI (needed to run `docker restart <container>` from inside
-# the container via the mounted Docker socket)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends docker.io && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /monitor
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+# Install Docker Python SDK — communicates with daemon via socket, no CLI binary needed
+COPY monitor/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY monitor/monitor.py .
 
