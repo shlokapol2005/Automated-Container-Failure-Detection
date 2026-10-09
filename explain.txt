@@ -1,0 +1,209 @@
+Everything is committed. Here's the complete summary of what was built:
+
+✅ Project Complete — All 8 Phases Done
+20/20 tests passing. Git repo initialized. All files committed.
+
+📁 Project Structure
+File	Phase	Purpose
+
+
+app/app.py
+1	Flask API with /, /health, /simulate-failure, /reset
+
+
+app/requirements.txt
+1	Flask, pytest, gunicorn, requests
+
+
+tests/test_app.py
+2	20 pytest tests across all endpoints
+
+
+conftest.py
+2	pytest path configuration
+
+
+Dockerfile
+3	Container with Gunicorn + built-in HEALTHCHECK
+
+
+docker-compose.yml
+4	Local deployment config
+
+
+monitor/monitor.py
+5+6	Health polling, auto-restart, Discord notifications
+
+
+.github/workflows/ci.yml
+7	Full CI/CD: test → build → push to Docker Hub
+
+
+README.md
+8	Full project documentation
+
+
+SETUP_GUIDE.md
+8	Step-by-step setup + viva demo script
+🚀 Next Steps to Push to GitHub
+powershell
+# In your project folder, after creating your GitHub repo:
+git branch -M main
+git remote add origin https://github.com/<your-username>/devops-labca.git
+git push -u origin main
+Then:
+
+Add GitHub Secrets: DOCKERHUB_USERNAME and DOCKERHUB_TOKEN → triggers CI/CD
+Copy .env.example → .env and add your Discord webhook URL
+Run docker compose up -d --build to deploy locally
+Run python monitor/monitor.py to start monitoring
+Trigger demo: curl -X POST http://localhost:5000/simulate-failure
+The SETUP_GUIDE.md has the full viva demonstration script word-for-word — everything you need to say in each step of the demo.
+
+9:12 PM
+tell what to run and what to show in live dmeo
+9:32 PM
+Here's your exact live demo script — copy-paste ready commands and what to say/show at each step.
+
+🎬 Live Demo — Step by Step
+Open 4 terminal windows before you start. Label them T1, T2, T3, T4.
+
+STEP 1 — Show GitHub Repo
+What to show: Open your GitHub repo in the browser.
+
+What to say: "All our code is version-controlled on GitHub. Every push to main automatically triggers the CI/CD pipeline."
+
+STEP 2 — Show Source Code
+What to show: Open 
+
+app/app.py
+ in your editor or on GitHub.
+
+What to say: "This is our Flask REST API. The /health endpoint reports HEALTHY or UNHEALTHY. The /simulate-failure endpoint lets us intentionally trigger a failure for this demo."
+
+STEP 3 — Run Automated Tests
+T1 — Run:
+
+powershell
+python -m pytest tests/ -v
+What to show: All 20 tests passing green.
+
+What to say: "We have 20 automated tests. These run automatically in GitHub Actions before any Docker image is built."
+
+STEP 4 — Show GitHub Actions Pipeline
+What to show: GitHub repo → Actions tab → click the latest workflow run → show the two jobs: Run Automated Tests ✅ and Build & Push Docker Image ✅
+
+What to say: "The pipeline automatically ran tests, built the Docker image, and pushed it to Docker Hub — all triggered by a single git push."
+
+STEP 5 — Show Docker Hub Image
+What to show: Open hub.docker.com → your repo → show flask-devops-app:latest with the push timestamp.
+
+What to say: "The CI/CD pipeline pushed our image to Docker Hub. This is our container registry."
+
+STEP 6 — Start Docker Compose Deployment
+T1 — Run:
+
+powershell
+docker compose up -d --build
+Then:
+
+powershell
+docker ps
+What to show: Container flask-devops-app listed as Up, status healthy.
+
+What to say: "We deploy locally using Docker Compose. The container is now running."
+
+STEP 7 — Show Application is HEALTHY
+T1 — Run:
+
+powershell
+curl http://localhost:5000/
+curl http://localhost:5000/health
+Expected output from /health:
+
+json
+{
+  "status": "HEALTHY",
+  "uptime_seconds": 12.5,
+  "message": "Application is running normally"
+}
+What to say: "The application is live and returning HEALTHY with HTTP 200."
+
+STEP 8 — Start the Health Monitor
+T2 — Load your Discord webhook and run:
+
+powershell
+$env:DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
+$env:CONTAINER_NAME = "flask-devops-app"
+$env:CHECK_INTERVAL = "10"
+python monitor/monitor.py
+What to show: Monitor printing green ✅ HEALTHY lines every 10 seconds.
+
+What to say: "The monitor polls /health every 10 seconds. If it detects two consecutive failures, it automatically restarts the container."
+
+STEP 9 — 🔥 Trigger Failure (The Key Demo Moment)
+T3 — Run:
+
+powershell
+curl -X POST http://localhost:5000/simulate-failure
+Expected response:
+
+json
+{
+  "message": "Failure simulation ACTIVATED",
+  "info": "The /health endpoint will now return UNHEALTHY (HTTP 503)"
+}
+Immediately switch to T2 to watch the monitor.
+
+What to say: "I've just triggered a simulated failure. The /health endpoint now returns HTTP 503 UNHEALTHY."
+
+STEP 10 — Watch Automatic Recovery
+T2 — Monitor output you'll see:
+
+[WARN  ] ⚠️  Check #1: UNHEALTHY — HTTP 503
+[WARN  ] ⚠️  Check #2: UNHEALTHY — HTTP 503
+[ERROR ] ❌  FAILURE DETECTED — HTTP 503 | status=UNHEALTHY
+[ACTION] 🔄  Restarting container 'flask-devops-app' ...
+[OK    ] ✅  Container 'flask-devops-app' restart command accepted
+[ACTION] 🔄  Waiting up to 60s for service to recover ...
+[INFO  ]     Recovery attempt #1 → HEALTHY (timeout in 55s)
+[OK    ] ✅  Service has RECOVERED successfully ✅
+What to say: "The monitor detected two consecutive failures, automatically ran docker restart, waited for the container to come back up, confirmed health, and is now sending a Discord notification."
+
+STEP 11 — Show Discord Notification
+What to show: Open Discord channel — show the two embeds that arrived:
+
+Notification	Color
+🚨 Service Failure Detected	Red
+✅ Service Recovered Successfully	Green
+What to say: "The Discord notification confirms the complete automated flow — failure detected, container restarted, service recovered."
+
+STEP 12 — Confirm Health Restored
+T3 — Run:
+
+powershell
+curl http://localhost:5000/health
+Expected: "status": "HEALTHY" again with a fresh uptime (small number = just restarted).
+
+What to say: "The service is back and healthy. The container restart reset the simulate-failure flag automatically, since it's stored in memory."
+
+🗣️ Final Summary to Say
+"This project demonstrates the complete DevOps pipeline:
+
+Git & GitHub — version control
+pytest — automated testing
+Docker — containerisation
+GitHub Actions — CI/CD (test → build → push)
+Docker Hub — image registry
+Docker Compose — local deployment
+monitor.py — health monitoring and failure detection
+docker restart — automatic self-recovery
+Discord webhook — real-time alerting
+All components work together as a single integrated DevOps pipeline."
+
+⚠️ Before Demo — Checklist
+ Docker Desktop is running
+ .env has your Discord webhook URL set
+ GitHub Actions pipeline shows ✅ green
+ Docker Hub shows the pushed image
+ Run docker compose down first, then docker compose up -d --build fresh

@@ -44,6 +44,7 @@ import subprocess
 import urllib.request
 import urllib.error
 from datetime import datetime
+import google.generativeai as genai
 
 
 # ─────────────────────────────────────────────
@@ -51,11 +52,15 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
 HEALTH_URL          = os.environ.get("HEALTH_URL", "http://localhost:5000/health")
 CONTAINER_NAME      = os.environ.get("CONTAINER_NAME", "flask-devops-app")
 CHECK_INTERVAL      = int(os.environ.get("CHECK_INTERVAL", "10"))
 RECOVERY_TIMEOUT    = int(os.environ.get("RECOVERY_TIMEOUT", "60"))
 MAX_RESTARTS        = int(os.environ.get("MAX_RESTARTS", "5"))
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 # ─────────────────────────────────────────────
@@ -107,7 +112,10 @@ def send_discord_notification(title: str, description: str, color: int) -> None:
     req = urllib.request.Request(
         DISCORD_WEBHOOK_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "DevOps-Monitor/1.0"
+        },
         method="POST"
     )
     try:
@@ -248,6 +256,30 @@ def handle_failure(result: dict) -> None:
 
     log("ERROR", f"FAILURE DETECTED — HTTP {http_code} | status={api_status}")
 
+    # ── AIOps: Analyze logs ────────────────────────────────────────────────────
+    ai_diagnosis = "🤖 AIOps is disabled. Please set GEMINI_API_KEY in .env."
+    if GEMINI_API_KEY:
+        log("ACTION", f"🧠 AIOps: Fetching logs and analyzing failure with Google Gemini...")
+        try:
+            import docker as docker_sdk
+            client = docker_sdk.from_env()
+            container = client.containers.get(CONTAINER_NAME)
+            logs = container.logs(tail=50).decode("utf-8")
+            
+            prompt = (
+                "You are an expert DevOps AI assistant. A Docker container just failed. "
+                "Analyze these last 50 lines of logs and tell me exactly why it failed. "
+                "Keep your response under 3 sentences, be concise, and format it nicely for a Discord alert.\n\n"
+                f"LOGS:\n{logs}"
+            )
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt)
+            log("OK", "🧠 AIOps: Diagnosis received from Gemini")
+            ai_diagnosis = f"🤖 **AIOps Diagnosis:**\n{response.text.strip()}"
+        except Exception as exc:
+            log("WARN", f"🧠 AIOps: Analysis failed: {exc}")
+            ai_diagnosis = f"🤖 AIOps Diagnosis failed: {exc}"
+
     # Step 1: Notify Discord of failure detection
     send_discord_notification(
         title="🚨 Service Failure Detected",
@@ -256,6 +288,7 @@ def handle_failure(result: dict) -> None:
             f"**Health URL:** `{HEALTH_URL}`\n"
             f"**HTTP Status:** `{http_code}`\n"
             f"**API Status:** `{api_status}`\n\n"
+            f"{ai_diagnosis}\n\n"
             "⏳ Initiating automatic recovery ..."
         ),
         color=0xFF0000  # Red
@@ -342,6 +375,7 @@ def main() -> None:
     log("INFO", f"Recovery timeout : {RECOVERY_TIMEOUT}s")
     log("INFO", f"Max restarts     : {MAX_RESTARTS} (escalation threshold)")
     log("INFO", f"Discord alerts   : {'ENABLED' if DISCORD_WEBHOOK_URL else 'DISABLED (set DISCORD_WEBHOOK_URL)'}")
+    log("INFO", f"AIOps (Gemini)   : {'ENABLED 🧠' if GEMINI_API_KEY else 'DISABLED (set GEMINI_API_KEY)'}")
     print("=" * 65)
     print()
 
