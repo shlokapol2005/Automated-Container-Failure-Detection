@@ -1,210 +1,227 @@
-# Automated Container Failure Detection, Self-Recovery and Notification
-### DevOps Mini Project — Flask · Docker · GitHub Actions · Discord
+# Automated Container Failure Detection, Self-Recovery & Notification
 
----
+A DevOps mini-project that implements an automated software delivery pipeline and a self-healing container monitoring system using Docker, GitHub Actions, Prometheus, Grafana, and Discord.
 
-## Project Overview
+## Overview
 
-This project implements a complete DevOps pipeline demonstrating:
+Container failures can interrupt application availability and require manual intervention. This project demonstrates a system that monitors a containerized Flask application, detects consecutive health-check failures, automatically restarts the affected container, verifies recovery, and sends incident notifications through Discord.
 
-| Requirement | Implementation |
-|---|---|
-| Version Control | Git + GitHub |
-| Working Application | Flask REST API |
-| Application Build | pip install + Docker build |
-| Automated Testing | pytest (20 tests) |
-| Containerisation | Docker + Docker Compose |
-| CI/CD Pipeline | GitHub Actions |
-| Deployment | Docker Compose (local) |
-| Health Monitoring | Custom Python monitor |
-| Failure Detection | HTTP /health polling |
-| Automatic Recovery | docker restart |
-| Notification | Discord webhook |
-| Documentation | README + SETUP_GUIDE |
+The project also implements a CI/CD pipeline that automates testing, Docker image building, and publishing to Docker Hub.
 
----
+## Features
+
+- **Version Control:** Git and GitHub for source-code management.
+- **Automated Testing:** pytest test suite for application endpoints and behavior.
+- **Containerization:** Docker image using Flask and Gunicorn.
+- **CI/CD Pipeline:** GitHub Actions automates testing, image building, and Docker Hub publishing.
+- **Health Monitoring:** Python monitor periodically checks application health.
+- **Failure Detection:** Detects two consecutive unhealthy health checks before initiating recovery.
+- **Automatic Recovery:** Uses the Docker SDK to restart the application container.
+- **Recovery Verification:** Checks whether the application returns to a healthy state within a configured timeout.
+- **Metrics and Observability:** Prometheus collects application metrics, and Grafana provides visualization.
+- **Discord Notifications:** Sends alerts when a failure is detected and when recovery succeeds or fails.
+- **Failure Simulation:** Provides an endpoint to simulate an unhealthy state for controlled testing.
 
 ## Architecture
 
-```
+```text
 Developer
-    │
-    ▼  git push
-GitHub Repository
-    │
-    ▼
-GitHub Actions CI/CD
-    ├── Run pytest tests
-    ├── Build Docker image
-    └── Push to Docker Hub
-              │
-              ▼
-        Docker Compose  (local laptop)
-              │
-              ▼
-          Flask API
-         /    \
-        /      \
-    GET /    GET /health
-                │
-                ▼
-         Health Monitor (monitor.py)
-                │
-        ┌───────┴────────┐
-        │                │
-     HEALTHY          UNHEALTHY
-        │                │
-    Continue        docker restart
-                         │
-                    Wait for recovery
-                         │
-                    GET /health
-                         │
-                    HEALTHY again
-                         │
-                  Discord Notification
+    |
+    v
+Git Push to GitHub
+    |
+    v
+GitHub Actions
+    |
+    +--> Automated Tests
+    |
+    +--> Docker Build and Smoke Test
+              |
+              v
+          Docker Hub
+
+Local Environment
+    |
+    v
+Docker Compose
+    |
+    +--> Flask Application
+    |        |
+    |        +--> /health
+    |        +--> /metrics
+    |
+    +--> Python Health Monitor
+    |        |
+    |        +--> Detect consecutive failures
+    |        +--> Restart container using Docker SDK
+    |        +--> Verify recovery
+    |        +--> Send Discord notifications
+    |
+    +--> Prometheus
+    |
+    +--> Grafana
 ```
 
----
+## Technology Stack
 
-## Project Structure
+| Component | Technology |
+|---|---|
+| Application | Python, Flask |
+| Application server | Gunicorn |
+| Testing | pytest |
+| Containerization | Docker |
+| Multi-container deployment | Docker Compose |
+| CI/CD | GitHub Actions |
+| Container registry | Docker Hub |
+| Monitoring and recovery | Python, Docker SDK |
+| Metrics collection | Prometheus |
+| Dashboards | Grafana |
+| Notifications | Discord Webhooks |
+| Version control | Git, GitHub |
 
-```
-devops-labca/
-├── app/
-│   ├── app.py               # Flask application
-│   └── requirements.txt     # Python dependencies
-├── tests/
-│   ├── __init__.py
-│   └── test_app.py          # pytest test suite (20 tests)
-├── monitor/
-│   └── monitor.py           # Health monitor + auto-recovery
-├── .github/
-│   └── workflows/
-│       └── ci.yml           # GitHub Actions pipeline
-├── Dockerfile               # Container image definition
-├── .dockerignore
-├── docker-compose.yml       # Local deployment
-├── pytest.ini               # Test configuration
-├── .env.example             # Environment variable template
-├── .gitignore
-├── README.md                # This file
-└── SETUP_GUIDE.md           # Step-by-step setup instructions
-```
+## Application Endpoints
 
----
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | Displays application information |
+| `/health` | GET | Returns application health and uptime |
+| `/metrics` | GET | Exposes metrics for Prometheus |
+| `/simulate-failure` | POST | Simulates an unhealthy application state |
+| `/reset` | POST | Resets the simulated failure state |
 
-## Quick Start
+The failure simulation endpoint is intended for development and demonstration purposes.
+
+## How Self-Recovery Works
+
+1. The Python monitor periodically requests the application's `/health` endpoint.
+2. If two consecutive checks fail, the monitor declares a failure.
+3. A Discord notification reports the detected incident.
+4. The monitor restarts the container using the Docker SDK.
+5. The monitor polls the application until recovery is verified or the timeout expires.
+6. A Discord notification reports the recovery outcome.
+
+This controlled workflow demonstrates automated incident detection and recovery without requiring manual container restarts.
+
+## CI/CD Workflow
+
+The GitHub Actions pipeline automates the delivery process:
+
+1. A push to the configured branch triggers the workflow.
+2. Automated tests execute.
+3. The Docker image is built and smoke-tested.
+4. If the required checks pass, the image is published to Docker Hub.
+5. The image is tagged for identification and reuse.
+
+Docker Hub publishing requires repository secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+
+The latest GitHub Actions run should be checked to confirm the pipeline succeeds.
+
+## Getting Started
+
+### Prerequisites
+
+- Git
+- Docker Desktop with Docker Compose
+- Python 3.11 or a compatible configured Python environment
+- GitHub account
+- Docker Hub account
+- Discord webhook for notifications
 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/devops-labca.git
-cd devops-labca
+git clone https://github.com/shlokapol2005/Automated-Container-Failure-Detection.git
+cd Automated-Container-Failure-Detection
 ```
 
-### 2. Set up environment variables
+### 2. Configure environment variables
 
-```bash
-cp .env.example .env
-# Edit .env and add your Discord webhook URL
+Create a local `.env` file from the provided template:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
-### 3. Start with Docker Compose
+Configure the Discord webhook and other required variables in `.env`. Never commit actual credentials or webhook URLs.
 
-```bash
+### 3. Start the application stack
+
+```powershell
 docker compose up -d --build
 ```
 
-### 4. Verify the application
+Check the running services:
 
-```bash
-curl http://localhost:5000/
-curl http://localhost:5000/health
+```powershell
+docker compose ps
 ```
 
-### 5. Run the health monitor
+### 4. Verify application health
 
-```bash
-# In a separate terminal
-python monitor/monitor.py
+```powershell
+Invoke-WebRequest http://localhost:5000/health -UseBasicParsing
 ```
 
-### 6. Trigger failure (for demonstration)
+A healthy application should return HTTP 200 and report `HEALTHY`.
 
-```bash
-curl -X POST http://localhost:5000/simulate-failure
-```
+### 5. Open monitoring interfaces
 
-Watch the monitor detect the failure, restart the container, confirm recovery, and send a Discord notification.
+| Service | URL |
+|---|---|
+| Application health | http://localhost:5000/health |
+| Application metrics | http://localhost:5000/metrics |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3000 |
 
----
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/` | Application status |
-| GET | `/health` | Health check (used by monitor) |
-| POST | `/simulate-failure` | **Trigger failure for demo** |
-| POST | `/reset` | Clear failure flag manually |
-
----
+Dashboard availability depends on the current Grafana provisioning configuration.
 
 ## Running Tests
 
-```bash
-# Install dependencies
-pip install -r app/requirements.txt
+Run the test suite locally:
 
-# Run all tests
-pytest tests/ -v
-
-# Run with coverage
-pytest tests/ -v --cov=app --cov-report=term-missing
+```powershell
+python -m pytest tests/ -v
 ```
 
----
+The GitHub Actions workflow also runs automated checks. Refer to its latest successful run for the verified test count and results.
 
-## CI/CD Pipeline
+## Demonstrating Failure Recovery
 
-Every `git push` to `main` triggers GitHub Actions:
+Open a terminal and follow the monitor logs:
 
-1. **Checkout** source code
-2. **Install** Python dependencies
-3. **Run** pytest (all 20 tests must pass)
-4. **Build** Docker image
-5. **Push** image to Docker Hub
+```powershell
+docker compose logs -f monitor
+```
 
-Configure these GitHub Secrets:
-- `DOCKERHUB_USERNAME` — your Docker Hub username
-- `DOCKERHUB_TOKEN` — Docker Hub access token
+In a second terminal, simulate a failure:
 
----
+```powershell
+Invoke-RestMethod -Uri http://localhost:5000/simulate-failure -Method POST
+```
 
-## Environment Variables
+Observe the monitor detect consecutive unhealthy checks, restart the container, verify recovery, and send Discord notifications.
 
-| Variable | Default | Description |
-|---|---|---|
-| `DISCORD_WEBHOOK_URL` | _(required)_ | Discord incoming webhook URL |
-| `HEALTH_URL` | `http://localhost:5000/health` | Health check endpoint |
-| `CONTAINER_NAME` | `flask-devops-app` | Docker container to restart |
-| `CHECK_INTERVAL` | `10` | Seconds between health checks |
-| `RECOVERY_TIMEOUT` | `60` | Max seconds to wait for recovery |
+Verify that the application has recovered:
 
----
+```powershell
+Invoke-WebRequest http://localhost:5000/health -UseBasicParsing
+```
 
-## Demonstration Flow
+## Security Considerations
 
-See **SETUP_GUIDE.md** for the complete step-by-step viva demonstration guide.
+- Store webhook URLs and credentials in environment variables.
+- Keep `.env` out of version control.
+- Restrict Docker socket access because it provides significant control over the Docker daemon.
+- Keep failure simulation endpoints restricted to testing environments.
+- Avoid exposing sensitive information in application logs or notifications.
 
----
+## Future Enhancements
 
-## Technologies Used
+- AI-assisted container log analysis and incident diagnosis.
+- Improved failure categorization and remediation recommendations.
+- Recovery-time metrics and historical incident reporting.
+- Enhanced alert escalation for repeated or unsuccessful recovery attempts.
 
-- **Python 3.11** + **Flask 3.0** — Web application
-- **pytest** — Automated testing
-- **Docker** + **Docker Compose** — Containerisation and deployment
-- **GitHub Actions** — CI/CD pipeline
-- **Docker Hub** — Container image registry
-- **Discord Webhooks** — Failure and recovery notifications
