@@ -1,6 +1,6 @@
 # Automated Container Failure Detection, Self-Recovery & Notification
 
-A DevOps mini-project that implements an automated software delivery pipeline and a self-healing container monitoring system using Docker, GitHub Actions, Prometheus, Grafana, and Discord — with optional **AIOps incident diagnosis** powered by the Claude API.
+A DevOps mini-project that implements an automated software delivery pipeline and a self-healing container monitoring system using Docker, GitHub Actions, Prometheus, Grafana, and Discord — with optional **AIOps incident diagnosis** powered by Google Gemini (free tier) or the Claude API.
 
 ## Overview
 
@@ -21,7 +21,7 @@ The project also implements a CI/CD pipeline that automates testing, Docker imag
 - **Metrics and Observability:** Prometheus collects application metrics, and Grafana provides visualization.
 - **Discord Notifications:** Sends alerts when a failure is detected and when recovery succeeds or fails.
 - **Failure Simulation:** Provides an endpoint to simulate an unhealthy state for controlled testing.
-- **AIOps Incident Diagnosis (optional):** After a confirmed failure, collects Docker logs, HTTP status, timestamps, and restart history, redacts secrets, and asks Claude for a structured diagnosis (likely cause, supporting evidence, severity, recommended remediation). The result is sent as an enhanced Discord embed together with the final recovery status. AI runs on a background thread and **never controls or delays recovery**.
+- **AIOps Incident Diagnosis (optional):** After a confirmed failure, collects Docker logs, HTTP status, timestamps, and restart history, redacts secrets, and asks an LLM — **Google Gemini (free)** or Claude — for a structured diagnosis (likely cause, supporting evidence, severity, recommended remediation). The result is sent as an enhanced Discord embed together with the final recovery status. AI runs on a background thread and **never controls or delays recovery**.
 
 ## Architecture
 
@@ -63,7 +63,8 @@ Docker Compose
     |                 +--> Collect evidence: Docker logs, container state,
     |                 |    HTTP status + timestamps, restart history
     |                 +--> Redact secrets (keys, tokens, webhooks, passwords, e-mails)
-    |                 +--> Claude API → structured JSON diagnosis (timeout-bounded)
+    |                 +--> Gemini (free) or Claude API → structured JSON diagnosis
+    |                 |    (timeout-bounded)
     |                 +--> Wait for recovery outcome from main thread
     |                 +--> Send enhanced "AIOps Incident Report" Discord embed
     |                      (falls back to "AI diagnosis unavailable" on any error)
@@ -88,7 +89,7 @@ Docker Compose
 | Metrics collection | Prometheus |
 | Dashboards | Grafana |
 | Notifications | Discord Webhooks |
-| AIOps diagnosis (optional) | Claude API (`anthropic` Python SDK) |
+| AIOps diagnosis (optional) | Google Gemini API — free tier (plain HTTPS) · or Claude API (`anthropic` SDK) |
 | Version control | Git, GitHub |
 
 ## Application Endpoints
@@ -120,7 +121,7 @@ This controlled workflow demonstrates automated incident detection and recovery 
 
 Implemented in [`monitor/ai_diagnosis.py`](monitor/ai_diagnosis.py) and wired into `handle_failure()` in [`monitor/monitor.py`](monitor/monitor.py).
 
-**Evidence sent to Claude** (after redaction):
+**Evidence sent to the AI** (after redaction):
 
 | Evidence | Source |
 |---|---|
@@ -129,7 +130,7 @@ Implemented in [`monitor/ai_diagnosis.py`](monitor/ai_diagnosis.py) and wired in
 | The two failed health checks: timestamp, HTTP status, API status, body | Monitor |
 | Recent restart history: time, success, recovered, recovery time | Monitor |
 
-**Structured output** (enforced with a JSON schema via `output_config.format`, then validated by `parse_diagnosis()`):
+**Structured output** (enforced with a JSON schema — Gemini `responseSchema` / Claude `output_config.format` — then validated by `parse_diagnosis()`):
 
 ```json
 {
@@ -154,10 +155,12 @@ Implemented in [`monitor/ai_diagnosis.py`](monitor/ai_diagnosis.py) and wired in
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | *(empty)* | Claude API key. Empty → AIOps disabled, monitor behaves exactly as before |
+| `GEMINI_API_KEY` | *(empty)* | **Free** Google Gemini key from https://aistudio.google.com |
+| `ANTHROPIC_API_KEY` | *(empty)* | Claude API key (paid alternative) |
+| `AI_PROVIDER` | *(auto)* | `gemini` or `claude`; empty = whichever key is set (Gemini first). No key → AIOps disabled, monitor behaves exactly as before |
 | `AI_DIAGNOSIS` | `true` | Master switch |
-| `AI_MODEL` | `claude-opus-5-5` | Claude model used for diagnosis |
-| `AI_EFFORT` | `low` | `low` / `medium` / `high` — lower is faster and cheaper |
+| `AI_MODEL` | *(auto)* | `gemini-flash-latest` for Gemini, `claude-opus-5-5` for Claude |
+| `AI_EFFORT` | `low` | Claude only: `low` / `medium` / `high` |
 | `AI_TIMEOUT` | `30` | Seconds before the AI call is abandoned |
 | `AI_LOG_LINES` | `100` | Number of container log lines sent as evidence |
 
@@ -206,7 +209,7 @@ Copy-Item .env.example .env
 
 Configure the Discord webhook and other required variables in `.env`. Never commit actual credentials or webhook URLs.
 
-To enable AIOps diagnosis, also set `ANTHROPIC_API_KEY` (create one at https://platform.claude.com). Leave it empty to run without AI.
+To enable AIOps diagnosis for free, set `GEMINI_API_KEY` (create one at https://aistudio.google.com → **Get API key**, no credit card). `ANTHROPIC_API_KEY` (Claude) is a paid alternative. Leave both empty to run without AI.
 
 ### 3. Start the application stack
 
@@ -266,7 +269,7 @@ In a second terminal, simulate a failure:
 Invoke-RestMethod -Uri http://localhost:5000/simulate-failure -Method POST
 ```
 
-Observe the monitor detect consecutive unhealthy checks, restart the container, verify recovery, and send Discord notifications. With `ANTHROPIC_API_KEY` set, a third Discord message — **🤖 AIOps Incident Report** — arrives with the AI diagnosis and the final recovery status.
+Observe the monitor detect consecutive unhealthy checks, restart the container, verify recovery, and send Discord notifications. With `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY`) set, a third Discord message — **🤖 AIOps Incident Report** — arrives with the AI diagnosis and the final recovery status.
 
 Verify that the application has recovered:
 
@@ -281,7 +284,7 @@ Invoke-WebRequest http://localhost:5000/health -UseBasicParsing
 - Restrict Docker socket access because it provides significant control over the Docker daemon.
 - Keep failure simulation endpoints restricted to testing environments.
 - Avoid exposing sensitive information in application logs or notifications.
-- Container logs are redacted (API keys, tokens, JWTs, webhook URLs, passwords, URL credentials, e-mails) before being sent to the Claude API.
+- Container logs are redacted (API keys, tokens, JWTs, webhook URLs, passwords, URL credentials, e-mails) before being sent to the AI provider. On Gemini's free tier Google may use requests to improve its products — another reason redaction happens first.
 - If a webhook URL or API key is ever pasted somewhere public, rotate it immediately.
 
 ## Future Enhancements

@@ -33,6 +33,16 @@ VALID = {
     "confidence": "high",
 }
 
+@pytest.fixture(autouse=True)
+def isolated_ai_config(monkeypatch):
+    """Every test starts with no keys, no provider override and default models."""
+    monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(ai_diagnosis, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(ai_diagnosis, "AI_PROVIDER", "")
+    monkeypatch.setattr(ai_diagnosis, "AI_MODEL", "")
+    monkeypatch.setattr(ai_diagnosis, "AI_DIAGNOSIS", True)
+
+
 FAILED_CHECKS = [
     {"timestamp": "2026-10-11 10:00:05", "http_code": 503, "status": "UNHEALTHY"},
     {"timestamp": "2026-10-11 10:00:15", "http_code": 503, "status": "UNHEALTHY"},
@@ -432,3 +442,199 @@ class TestMonitorIntegration:
         report = next(e for k, e in events if k == "ai_report")
         assert "unavailable" in report["description"]
         assert "Restart failed" in report["fields"][-1]["value"]
+
+
+# ─────────────────────────────────────────────
+# Provider selection + Google Gemini (free tier)
+# ─────────────────────────────────────────────
+
+class FakeGemini:
+    """Mimics _gemini_http(model, body, timeout) -> parsed JSON response."""
+
+    def __init__(self, text=None, response=None, exc=None, delay=0.0):
+        self.text, self.response, self.exc, self.delay = text, response, exc, delay
+        self.calls = []
+
+    def __call__(self, model, body, timeout):
+        self.calls.append({"model": model, "body": body, "timeout": timeout})
+        if self.delay:
+            time.sleep(self.delay)
+        if self.exc:
+            raise self.exc
+        if self.response is not None:
+            return self.response
+        return {"candidates": [{"finishReason": "STOP",
+                                "content": {"parts": [{"text": self.text}]}}]}
+
+
+class TestProviderSelection:
+    def test_disabled_without_keys(self):
+        assert ai_diagnosis.provider() == ""
+        assert ai_diagnosis.is_enabled() is False
+
+    def test_gemini_key_selects_gemini(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        assert ai_diagnosis.provider() == "gemini"
+        assert ai_diagnosis.is_enabled() is True
+        assert ai_diagnosis.model_for("gemini") == "gemini-flash-latest"
+
+    def test_claude_key_selects_claude(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "ANTHROPIC_API_KEY", "a-key")
+        assert ai_diagnosis.provider() == "claude"
+        assert ai_diagnosis.model_for("claude") == "claude-opus-5-5"
+
+    def test_gemini_preferred_when_both_keys_set(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        monkeypatch.setattr(ai_diagnosis, "ANTHROPIC_API_KEY", "a-key")
+        assert ai_diagnosis.provider() == "gemini"
+
+    def test_explicit_provider_wins(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        monkeypatch.setattr(ai_diagnosis, "ANTHROPIC_API_KEY", "a-key")
+        monkeypatch.setattr(ai_diagnosis, "AI_PROVIDER", "claude")
+        assert ai_diagnosis.provider() == "claude"
+
+    def test_explicit_provider_without_its_key_is_disabled(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "ANTHROPIC_API_KEY", "a-key")
+        monkeypatch.setattr(ai_diagnosis, "AI_PROVIDER", "gemini")
+        assert ai_diagnosis.is_enabled() is False
+
+    def test_ai_model_override(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "AI_MODEL", "gemini-3.6-flash")
+        assert ai_diagnosis.model_for("gemini") == "gemini-3.6-flash"
+
+    def test_master_switch(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        monkeypatch.setattr(ai_diagnosis, "AI_DIAGNOSIS", False)
+        assert ai_diagnosis.is_enabled() is False
+
+
+class TestGemini:
+    def test_success_and_request_shape(self):
+        fake = FakeGemini(text=json.dumps(VALID))
+        d = request_diagnosis(evidence(), client=fake, provider_name="gemini")
+        assert d["severity"] == "medium"
+        call = fake.calls[0]
+        assert call["model"] == "gemini-flash-latest"
+        cfg = call["body"]["generationConfig"]
+        assert cfg["responseMimeType"] == "application/json"
+        assert cfg["responseSchema"]["type"] == "OBJECT"
+        assert cfg["responseSchema"]["properties"]["severity"]["enum"] == list(ai_diagnosis.SEVERITIES)
+        assert "additionalProperties" not in json.dumps(cfg["responseSchema"])
+        assert "<evidence>" in call["body"]["contents"][0]["parts"][0]["text"]
+
+    def test_thought_parts_are_ignored(self):
+        resp = {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+            {"text": "thinking about it...", "thought": True},
+            {"text": json.dumps(VALID)},
+        ]}}]}
+        assert request_diagnosis(evidence(), client=FakeGemini(response=resp),
+                                 provider_name="gemini")["severity"] == "medium"
+
+    @pytest.mark.parametrize("resp,match", [
+        ({"promptFeedback": {"blockReason": "SAFETY"}}, "declined"),
+        ({"candidates": []}, "no candidates"),
+        ({"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "{"}]}}]}, "truncated"),
+        ({"candidates": [{"finishReason": "SAFETY"}]}, "declined"),
+        ({"candidates": [{"finishReason": "STOP", "content": {"parts": []}}]}, "no text"),
+    ])
+    def test_bad_responses_raise(self, resp, match):
+        with pytest.raises(DiagnosisError, match=match):
+            request_diagnosis(evidence(), client=FakeGemini(response=resp), provider_name="gemini")
+
+    def test_malformed_json_falls_back(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        r = diagnose(evidence(), client=FakeGemini(text="the server crashed"), timeout=5)
+        assert r["ok"] is False
+        assert r["provider"] == "Google Gemini"
+
+    def test_rate_limit_error_falls_back(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        err = DiagnosisError("Gemini API HTTP 429: Resource has been exhausted (e.g. check quota).")
+        r = diagnose(evidence(), client=FakeGemini(exc=err), timeout=5)
+        assert r["ok"] is False
+        assert "429" in r["error"]
+
+    def test_timeout_falls_back(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        start = time.time()
+        r = diagnose(evidence(), client=FakeGemini(text=json.dumps(VALID), delay=10), timeout=0.2)
+        assert r["ok"] is False and "Timed out" in r["error"]
+        assert time.time() - start < 5
+
+    def test_diagnose_ok_reports_provider(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        r = diagnose(evidence(), client=FakeGemini(text=json.dumps(VALID)), timeout=5)
+        assert r["ok"] is True and r["provider"] == "Google Gemini"
+        e = build_incident_embed("c", FAILED_CHECKS, r, {"restarted": True, "recovered": True}, 1, 5)
+        assert "Google Gemini" in e["footer"]["text"]
+
+    def test_no_secrets_reach_gemini(self):
+        fake = FakeGemini(text=json.dumps(VALID))
+        ev = build_evidence("c", "u", FAILED_CHECKS, [], {"logs": "GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnopqrstuv"})
+        request_diagnosis(ev, client=fake, provider_name="gemini")
+        assert "AIzaSy" not in json.dumps(fake.calls[0]["body"])
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode()
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestGeminiHTTP:
+    def test_key_sent_in_header_not_url(self, monkeypatch):
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "secret-gemini-key")
+        seen = {}
+
+        def fake_urlopen(req, timeout):
+            seen["url"], seen["headers"], seen["timeout"] = req.full_url, dict(req.header_items()), timeout
+            return _FakeHTTPResponse({"ok": 1})
+
+        monkeypatch.setattr(ai_diagnosis.urllib.request, "urlopen", fake_urlopen)
+        assert ai_diagnosis._gemini_http("gemini-flash-latest", {"x": 1}, 7) == {"ok": 1}
+        assert seen["url"].endswith("/models/gemini-flash-latest:generateContent")
+        assert "secret-gemini-key" not in seen["url"]
+        assert seen["headers"]["X-goog-api-key"] == "secret-gemini-key"
+        assert seen["timeout"] == 7
+
+    def test_http_error_becomes_diagnosis_error(self, monkeypatch):
+        import io
+        import urllib.error
+
+        def fake_urlopen(req, timeout):
+            body = io.BytesIO(json.dumps({"error": {"message": "API key not valid."}}).encode())
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, body)
+
+        monkeypatch.setattr(ai_diagnosis.urllib.request, "urlopen", fake_urlopen)
+        with pytest.raises(DiagnosisError, match="HTTP 400: API key not valid"):
+            ai_diagnosis._gemini_http("gemini-flash-latest", {}, 5)
+
+
+class TestMonitorWithGemini:
+    def test_gemini_report_without_delaying_restart(self, monitor_env, monkeypatch):
+        monitor, events = monitor_env
+        monkeypatch.setattr(ai_diagnosis, "GEMINI_API_KEY", "g-key")
+        slow = FakeGemini(text=json.dumps(VALID), delay=1.5)
+        monkeypatch.setattr(ai_diagnosis, "_gemini_http", slow)
+        monkeypatch.setattr(ai_diagnosis, "collect_docker_evidence", fake_collect)
+
+        start = time.time()
+        monitor.handle_failure(FAIL_RESULT, FAILED_CHECKS)
+        assert time.time() - start < 1.0
+        assert [k for k, _ in events][:3] == ["restart", "alert", "alert"]
+
+        deadline = time.time() + 5
+        while time.time() < deadline and not any(k == "ai_report" for k, _ in events):
+            time.sleep(0.05)
+        report = next(e for k, e in events if k == "ai_report")
+        assert "MEDIUM" in report["description"]
+        assert "Google Gemini" in report["footer"]["text"]

@@ -10,8 +10,9 @@
 #   This is the standard, production-grade pattern for sidecar containers
 #   that need to control sibling containers.
 #
-# AIOps: the `anthropic` SDK (Claude API) is also installed. It is only used by
-#   ai_diagnosis.py on a background thread; recovery never depends on it.
+# AIOps: ai_diagnosis.py calls Google Gemini via plain HTTPS (no extra package)
+#   or Claude via the `anthropic` SDK, on a background thread only;
+#   recovery never depends on it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim
