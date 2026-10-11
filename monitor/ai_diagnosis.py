@@ -1,7 +1,7 @@
 """
 ai_diagnosis.py
 ──────────────────────────────────────────────────────────────────────────────
-AIOps Intelligent Incident Diagnosis (Claude API)
+AIOps Intelligent Incident Diagnosis (Google Gemini — free tier — or Claude API)
 
 Automated Container Failure Detection, Self-Recovery and Notification
 DevOps Mini Project
@@ -12,7 +12,7 @@ WHAT THIS MODULE DOES:
     1. Collects evidence: recent Docker logs, container state, the failed
        health checks (HTTP status + timestamps) and the restart history
     2. Redacts secrets (API keys, tokens, webhook URLs, passwords, e-mails)
-    3. Asks Claude for a structured diagnosis:
+    3. Asks an LLM (Gemini or Claude) for a structured diagnosis:
          likely_cause, supporting_evidence, severity, recommended_remediation
     4. Waits for the main thread to report the final recovery outcome
     5. Sends ONE enhanced Discord embed: failure details + AI diagnosis +
@@ -30,11 +30,15 @@ SAFETY GUARANTEES (AI never controls or delays recovery):
     SDK itself were to hang.
 
 ENVIRONMENT VARIABLES:
-  ANTHROPIC_API_KEY  – Claude API key. Unset → AI diagnosis disabled.
+  GEMINI_API_KEY     – Google Gemini API key (free tier, aistudio.google.com)
+  ANTHROPIC_API_KEY  – Claude API key (paid alternative)
+                       Neither key set → AI diagnosis disabled.
+  AI_PROVIDER        – gemini | claude (default: auto — whichever key is set,
+                       Gemini first)
   AI_DIAGNOSIS       – "true"/"false" master switch (default: true)
-  AI_MODEL           – Claude model ID (default: claude-opus-5-5)
-  AI_EFFORT          – low | medium | high (default: low — fast diagnosis)
-  AI_TIMEOUT         – Max seconds for the Claude call (default: 30)
+  AI_MODEL           – Model ID (default: gemini-flash-latest / claude-opus-5-5)
+  AI_EFFORT          – Claude only: low | medium | high (default: low)
+  AI_TIMEOUT         – Max seconds for the AI call (default: 30)
   AI_LOG_LINES       – Docker log lines sent as evidence (default: 100)
 ──────────────────────────────────────────────────────────────────────────────
 """
@@ -44,6 +48,9 @@ import os
 import re
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 
@@ -51,9 +58,11 @@ from datetime import datetime, timezone
 # Configuration
 # ─────────────────────────────────────────────
 
+GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+AI_PROVIDER       = os.environ.get("AI_PROVIDER", "").strip().lower()
 AI_DIAGNOSIS      = os.environ.get("AI_DIAGNOSIS", "true").strip().lower() not in ("0", "false", "no", "off")
-AI_MODEL          = os.environ.get("AI_MODEL", "claude-opus-5-5")
+AI_MODEL          = os.environ.get("AI_MODEL", "").strip()
 AI_EFFORT         = os.environ.get("AI_EFFORT", "low")
 AI_TIMEOUT        = float(os.environ.get("AI_TIMEOUT", "30"))
 AI_LOG_LINES      = int(os.environ.get("AI_LOG_LINES", "100"))
@@ -69,12 +78,48 @@ SEVERITIES = ("low", "medium", "high", "critical")
 _FIELD_LIMIT = 1024
 
 
+DEFAULT_MODELS = {
+    # Alias that Google keeps pointed at the current Flash model (free tier)
+    "gemini": "gemini-flash-latest",
+    "claude": "claude-opus-5-5",
+}
+PROVIDER_LABELS = {"gemini": "Google Gemini", "claude": "Claude"}
+
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+def provider() -> str:
+    """The LLM provider in use: AI_PROVIDER if set, else whichever key exists (Gemini first)."""
+    if AI_PROVIDER in DEFAULT_MODELS:
+        return AI_PROVIDER
+    if GEMINI_API_KEY:
+        return "gemini"
+    if ANTHROPIC_API_KEY:
+        return "claude"
+    return ""
+
+
+def _api_key(name: str) -> str:
+    return {"gemini": GEMINI_API_KEY, "claude": ANTHROPIC_API_KEY}.get(name, "")
+
+
+def model_for(name: str) -> str:
+    return AI_MODEL or DEFAULT_MODELS.get(name, "")
+
+
+def describe() -> str:
+    """Human-readable provider/model, e.g. 'Google Gemini (gemini-flash-latest)'."""
+    name = provider()
+    return f"{PROVIDER_LABELS.get(name, name)} ({model_for(name)})" if name else "none"
+
+
 def is_enabled() -> bool:
-    return AI_DIAGNOSIS and bool(ANTHROPIC_API_KEY)
+    name = provider()
+    return AI_DIAGNOSIS and bool(name) and bool(_api_key(name))
 
 
 class DiagnosisError(Exception):
-    """Raised when Claude's reply cannot be turned into a valid diagnosis."""
+    """Raised when the LLM reply cannot be turned into a valid diagnosis."""
 
 
 # ─────────────────────────────────────────────
@@ -168,7 +213,7 @@ def collect_docker_evidence(container_name: str, log_lines: int = AI_LOG_LINES) 
 
 def build_evidence(container_name: str, health_url: str, failed_checks: list,
                    restart_history: list, docker_evidence: dict) -> dict:
-    """Assemble the (redacted) evidence package that is sent to Claude."""
+    """Assemble the (redacted) evidence package that is sent to the LLM."""
     evidence = {
         "container": container_name,
         "health_url": health_url,
@@ -181,7 +226,7 @@ def build_evidence(container_name: str, health_url: str, failed_checks: list,
 
 
 # ─────────────────────────────────────────────
-# Claude request + response parsing
+# LLM request + response parsing
 # ─────────────────────────────────────────────
 
 DIAGNOSIS_SCHEMA = {
@@ -237,7 +282,7 @@ def _as_list(value) -> list:
 
 def parse_diagnosis(raw) -> dict:
     """
-    Validate and normalise Claude's JSON reply.
+    Validate and normalise the LLM's JSON reply.
 
     Accepts a JSON string (optionally wrapped in a ```json fence) or a dict.
     Raises DiagnosisError if required information is missing or invalid.
@@ -288,13 +333,98 @@ def _create_client(timeout: float):
 
 
 def request_diagnosis(evidence: dict, client=None, model: str = None,
-                      timeout: float = None) -> dict:
+                      timeout: float = None, provider_name: str = None) -> dict:
     """
-    Call the Claude Messages API with structured output and return a parsed
-    diagnosis. Raises on any error — use diagnose() for the never-raises version.
+    Ask the configured LLM for a structured diagnosis and return it parsed.
+    Raises on any error — use diagnose() for the never-raises version.
     """
-    model = model or AI_MODEL
+    name = provider_name or provider() or "claude"
     timeout = AI_TIMEOUT if timeout is None else timeout
+    model = model or model_for(name)
+    if name == "gemini":
+        return _request_gemini(evidence, client, model, timeout)
+    return _request_claude(evidence, client, model, timeout)
+
+
+# ── Google Gemini (REST via urllib — no extra dependency) ─────────────────────
+
+def _to_gemini_schema(schema: dict) -> dict:
+    """Convert our JSON Schema to Gemini's OpenAPI-style responseSchema."""
+    out = {}
+    for key, value in schema.items():
+        if key == "additionalProperties":
+            continue
+        if key == "type":
+            out["type"] = value.upper()
+        elif key == "properties":
+            out["properties"] = {k: _to_gemini_schema(v) for k, v in value.items()}
+        elif key == "items":
+            out["items"] = _to_gemini_schema(value)
+        else:
+            out[key] = value
+    return out
+
+
+def _gemini_http(model: str, body: dict, timeout: float) -> dict:
+    """POST to the Gemini generateContent endpoint. The key goes in a header, never the URL."""
+    url = GEMINI_ENDPOINT.format(model=urllib.parse.quote(model.removeprefix("models/"), safe=""))
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            message = json.loads(exc.read().decode("utf-8"))["error"]["message"]
+        except Exception:
+            message = exc.reason
+        raise DiagnosisError(f"Gemini API HTTP {exc.code}: {_clip(message, 200)}") from None
+
+
+_GEMINI_BLOCKED = {"SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"}
+
+
+def _request_gemini(evidence: dict, client, model: str, timeout: float) -> dict:
+    call = client or _gemini_http   # client: callable(model, body, timeout) -> dict
+    body = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": build_prompt(evidence)}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": _to_gemini_schema(DIAGNOSIS_SCHEMA),
+            "temperature": 0.2,
+            "maxOutputTokens": 8192,
+        },
+    }
+    data = call(model, body, timeout)
+
+    block = (data.get("promptFeedback") or {}).get("blockReason")
+    if block:
+        raise DiagnosisError(f"Gemini declined to analyse this evidence ({block})")
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise DiagnosisError("Gemini returned no candidates")
+    candidate = candidates[0]
+    finish = candidate.get("finishReason")
+    if finish == "MAX_TOKENS":
+        raise DiagnosisError("Gemini's response was truncated (MAX_TOKENS)")
+    if finish in _GEMINI_BLOCKED:
+        raise DiagnosisError(f"Gemini declined to analyse this evidence ({finish})")
+
+    parts = (candidate.get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    if not text.strip():
+        raise DiagnosisError("Response contained no text")
+    return parse_diagnosis(text)
+
+
+# ── Claude (Anthropic SDK) ────────────────────────────────────────────────────
+
+def _request_claude(evidence: dict, client, model: str, timeout: float) -> dict:
     client = client or _create_client(timeout)
 
     kwargs = dict(
@@ -330,10 +460,11 @@ def diagnose(evidence: dict, client=None, timeout: float = None) -> dict:
     """
     Never-raises wrapper with a hard wall-clock deadline.
 
-    Returns {"ok": True, "diagnosis": {...}, "duration": s}
-         or {"ok": False, "error": "<reason>", "duration": s}
+    Returns {"ok": True, "diagnosis": {...}, "duration": s, "provider": label}
+         or {"ok": False, "error": "<reason>", "duration": s, "provider": label}
     """
     timeout = AI_TIMEOUT if timeout is None else timeout
+    label = PROVIDER_LABELS.get(provider() or "claude")
     started = time.time()
     outcome = {}
 
@@ -345,16 +476,17 @@ def diagnose(evidence: dict, client=None, timeout: float = None) -> dict:
 
     # Run the call on its own daemon thread so a hung connection cannot
     # outlive the deadline.
-    caller = threading.Thread(target=_call, name="claude-diagnosis-call", daemon=True)
+    caller = threading.Thread(target=_call, name="ai-diagnosis-call", daemon=True)
     caller.start()
     caller.join(timeout + 2)  # small grace period over the SDK's own timeout
     duration = round(time.time() - started, 1)
 
     if caller.is_alive():
-        return {"ok": False, "error": f"Timed out after {timeout:g}s", "duration": duration}
+        return {"ok": False, "error": f"Timed out after {timeout:g}s", "duration": duration, "provider": label}
     if "diagnosis" in outcome:
-        return {"ok": True, "diagnosis": outcome["diagnosis"], "duration": duration}
-    return {"ok": False, "error": redact(outcome.get("error", "Unknown error")), "duration": duration}
+        return {"ok": True, "diagnosis": outcome["diagnosis"], "duration": duration, "provider": label}
+    return {"ok": False, "error": redact(outcome.get("error", "Unknown error")),
+            "duration": duration, "provider": label}
 
 
 # ─────────────────────────────────────────────
@@ -423,7 +555,8 @@ def build_incident_embed(container_name: str, failed_checks: list, ai_result: di
         "description": description,
         "color": color,
         "fields": fields,
-        "footer": {"text": "Claude AIOps • advisory only — recovery is automatic and deterministic"},
+        "footer": {"text": f"AIOps ({ai_result.get('provider') or 'AI'}) • advisory only — "
+                           "recovery is automatic and deterministic"},
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
     }
 
@@ -481,7 +614,7 @@ class IncidentDiagnosisWorker:
 
     def _run(self) -> None:
         try:
-            self.log("ACTION", "🧠 AIOps: collecting evidence and requesting Claude diagnosis (background)")
+            self.log("ACTION", "🧠 AIOps: collecting evidence and requesting AI diagnosis (background)")
             docker_evidence = self.collect(self.container_name)
             evidence = build_evidence(self.container_name, self.health_url, self.failed_checks,
                                       self.restart_history, docker_evidence)

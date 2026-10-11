@@ -14,7 +14,7 @@ Install the following before starting:
 | Python 3.11+ | https://python.org |
 | Docker Desktop | https://docker.com/products/docker-desktop |
 | A Discord account | https://discord.com |
-| A Claude API key *(optional — for AIOps diagnosis)* | https://platform.claude.com |
+| A free Google Gemini API key *(optional — for AIOps diagnosis)* | https://aistudio.google.com |
 
 Verify installations:
 ```bash
@@ -61,11 +61,13 @@ These are used by GitHub Actions to push to Docker Hub securely.
 
 ---
 
-## STEP 3b — (Optional) Get a Claude API Key for AIOps Diagnosis
+## STEP 3b — (Optional) Get a FREE Gemini API Key for AIOps Diagnosis
 
-1. Go to https://platform.claude.com and sign in
-2. Open **API Keys → Create Key**, name it `devops-monitor`
-3. Copy the key (it starts with `sk-ant-`) — you will add it to `.env`
+1. Go to https://aistudio.google.com and sign in with a Google account
+2. Click **Get API key → Create API key** (no credit card needed)
+3. Copy the key (it usually starts with `AIza`) — you will add it to `.env`
+
+*(Paid alternative: a Claude key from https://platform.claude.com → `ANTHROPIC_API_KEY`.)*
 
 Without a key the project works exactly as before; you just won't get the **🤖 AIOps Incident Report** embed.
 
@@ -81,12 +83,11 @@ cp .env.example .env
 Open `.env` and replace the placeholders:
 ```
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
-ANTHROPIC_API_KEY=sk-ant-...        # optional — enables AIOps diagnosis
+GEMINI_API_KEY=AIza...              # optional (free) — enables AIOps diagnosis
 ```
 
 Leave all other values as their defaults for now. `.env` is listed in `.gitignore` and `.dockerignore`, so it is never committed or baked into an image.
 
-> If your old `.env` contains `GEMINI_API_KEY`, delete that line — the project now uses the Claude API (`ANTHROPIC_API_KEY`).
 
 ---
 
@@ -210,7 +211,7 @@ You should see:
 [INFO  ] Container name  : flask-devops-app
 [INFO  ] Check interval  : 10s
 [INFO  ] Discord alerts  : ENABLED
-[INFO  ] AIOps (Claude)  : ENABLED 🧠 model=claude-opus-5-5
+[INFO  ] AIOps diagnosis : ENABLED 🧠 Google Gemini (gemini-flash-latest)
 =================================================================
 
 [2026-09-21 21:00:00] [OK    ] ✅  HEALTHY — HTTP 200 | uptime=45.2s
@@ -240,7 +241,7 @@ Watch the **monitor terminal** — within 20 seconds you will see:
 [WARN  ] ⚠️  Check #1: UNHEALTHY — HTTP 503
 [WARN  ] ⚠️  Check #2: UNHEALTHY — HTTP 503
 [ERROR ] ❌  FAILURE DETECTED — HTTP 503 | status=UNHEALTHY
-[ACTION] 🔄  🧠 AIOps: collecting evidence and requesting Claude diagnosis (background)
+[ACTION] 🔄  🧠 AIOps: collecting evidence and requesting AI diagnosis (background)
 [ACTION] 🔄  Restarting container 'flask-devops-app' ...
 [OK    ] ✅  Container 'flask-devops-app' restarted successfully via Docker SDK
 [OK    ] ✅  Discord notification sent successfully
@@ -257,7 +258,7 @@ Note that the restart is issued straight away — the AI diagnosis runs in paral
 Check Discord — you will receive these notifications:
 1. 🚨 Service Failure Detected
 2. ✅ Service Recovered Successfully
-3. 🤖 AIOps Incident Report — severity, likely cause, supporting evidence, recommended action, final recovery status *(only when `ANTHROPIC_API_KEY` is set)*
+3. 🤖 AIOps Incident Report — severity, likely cause, supporting evidence, recommended action, final recovery status *(only when `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` is set)*
 
 ### STEP 10b — Prove that AI can never block recovery
 
@@ -265,14 +266,14 @@ Set an invalid key (or a tiny timeout) and repeat Step 10:
 
 ```bash
 # in .env
-ANTHROPIC_API_KEY=sk-ant-invalid
+GEMINI_API_KEY=invalid-key
 # or: AI_TIMEOUT=0.1
 
 docker compose up -d monitor        # recreates the monitor with the new settings
 curl -X POST http://localhost:5000/simulate-failure
 ```
 
-The restart and the standard alerts behave exactly the same; the AIOps embed says **"AI diagnosis unavailable"** with the reason (e.g. `AuthenticationError` or `Timed out after 0.1s`).
+The restart and the standard alerts behave exactly the same; the AIOps embed says **"AI diagnosis unavailable"** with the reason (e.g. `Gemini API HTTP 400: API key not valid` or `Timed out after 0.1s`).
 
 ---
 
@@ -352,9 +353,11 @@ docker ps | grep flask-devops-app
 - Make sure the environment is loaded before running the monitor
 
 ### AIOps report missing or says "AI diagnosis unavailable"
-- Check the monitor banner: `AIOps (Claude) : ENABLED` means the key was picked up
-- `AuthenticationError` → wrong/revoked `ANTHROPIC_API_KEY`
-- `Timed out` → raise `AI_TIMEOUT` or lower `AI_EFFORT`
+- Check the monitor banner: `AIOps diagnosis : ENABLED` means the key was picked up
+- `HTTP 400: API key not valid` → wrong `GEMINI_API_KEY` (Claude: `AuthenticationError` → wrong `ANTHROPIC_API_KEY`)
+- `HTTP 429` → Gemini free-tier rate limit; wait a minute and retry
+- `HTTP 404` (model not found) → set `AI_MODEL` to a current Flash model listed in Google AI Studio
+- `Timed out` → raise `AI_TIMEOUT`
 - `No module named 'anthropic'` → rebuild the monitor image (`docker compose up -d --build monitor`) or `pip install -r monitor/requirements.txt`
 - Recovery and the standard alerts are unaffected in every case
 

@@ -11,7 +11,7 @@ WHAT THIS SCRIPT DOES:
   2. If HEALTHY  → logs OK, continues watching
   3. If UNHEALTHY (2 consecutive) →
        a. Starts the AIOps diagnosis worker on a background thread
-          (ai_diagnosis.py — Claude API). It never blocks steps b–f.
+          (ai_diagnosis.py — Gemini or Claude). It never blocks steps b–f.
        b. Restarts the container immediately (Docker SDK)
        c. Sends Discord "failure detected" alert
        d. Polls recovery (every 5s, up to RECOVERY_TIMEOUT)
@@ -30,7 +30,8 @@ ENVIRONMENT VARIABLES (set in .env or docker-compose environment):
   CHECK_INTERVAL       – Seconds between health checks (default: 10)
   RECOVERY_TIMEOUT     – Max seconds to wait for recovery (default: 60)
   MAX_RESTARTS         – Restarts before escalation alert (default: 5)
-  ANTHROPIC_API_KEY    – Claude API key; enables AIOps diagnosis (optional)
+  GEMINI_API_KEY       – Google Gemini key (free); enables AIOps diagnosis (optional)
+  ANTHROPIC_API_KEY    – Claude API key (paid alternative)
   (see ai_diagnosis.py for the other AI_* settings)
 
 USAGE:
@@ -416,7 +417,7 @@ def main() -> None:
     log("INFO", f"Recovery timeout : {RECOVERY_TIMEOUT}s")
     log("INFO", f"Max restarts     : {MAX_RESTARTS} (escalation threshold)")
     log("INFO", f"Discord alerts   : {'ENABLED' if DISCORD_WEBHOOK_URL else 'DISABLED (set DISCORD_WEBHOOK_URL)'}")
-    log("INFO", f"AIOps (Claude)   : {'ENABLED 🧠 model=' + ai_diagnosis.AI_MODEL if ai_diagnosis.is_enabled() else 'DISABLED (set ANTHROPIC_API_KEY)'}")
+    log("INFO", f"AIOps diagnosis  : {'ENABLED 🧠 ' + ai_diagnosis.describe() if ai_diagnosis.is_enabled() else 'DISABLED (set GEMINI_API_KEY)'}")
     print("=" * 65)
     print()
 
