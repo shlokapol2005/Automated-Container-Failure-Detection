@@ -5,6 +5,7 @@
 # Services:
 #   flask-app   — The Flask REST API (port 5000)
 #   monitor     — Health monitor + auto-recovery daemon (Docker socket access)
+#                 + optional AIOps incident diagnosis via the Claude API
 #   prometheus  — Metrics scraper, scrapes /metrics every 10s (port 9090)
 #   grafana     — Dashboard UI, auto-loads DevOps dashboard (port 3000)
 #
@@ -57,6 +58,13 @@ services:
       - CHECK_INTERVAL=${CHECK_INTERVAL:-10}
       - RECOVERY_TIMEOUT=${RECOVERY_TIMEOUT:-60}
       - MAX_RESTARTS=${MAX_RESTARTS:-5}
+      # ── AIOps incident diagnosis (optional — disabled if ANTHROPIC_API_KEY is empty)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - AI_DIAGNOSIS=${AI_DIAGNOSIS:-true}
+      - AI_MODEL=${AI_MODEL:-claude-opus-5-5}
+      - AI_EFFORT=${AI_EFFORT:-low}
+      - AI_TIMEOUT=${AI_TIMEOUT:-30}
+      - AI_LOG_LINES=${AI_LOG_LINES:-100}
     volumes:
       # Mount the Docker socket so monitor can issue docker restart commands
       - /var/run/docker.sock:/var/run/docker.sock

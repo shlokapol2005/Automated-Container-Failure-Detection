@@ -14,6 +14,7 @@ Install the following before starting:
 | Python 3.11+ | https://python.org |
 | Docker Desktop | https://docker.com/products/docker-desktop |
 | A Discord account | https://discord.com |
+| A Claude API key *(optional — for AIOps diagnosis)* | https://platform.claude.com |
 
 Verify installations:
 ```bash
@@ -56,6 +57,18 @@ These are used by GitHub Actions to push to Docker Hub securely.
 5. Click **Copy Webhook URL**
 6. Save this URL — you will add it to your `.env` file
 
+> ⚠️ Treat the webhook URL like a password: anyone who has it can post to your channel. If it is ever shared in chat or committed, delete the webhook and create a new one.
+
+---
+
+## STEP 3b — (Optional) Get a Claude API Key for AIOps Diagnosis
+
+1. Go to https://platform.claude.com and sign in
+2. Open **API Keys → Create Key**, name it `devops-monitor`
+3. Copy the key (it starts with `sk-ant-`) — you will add it to `.env`
+
+Without a key the project works exactly as before; you just won't get the **🤖 AIOps Incident Report** embed.
+
 ---
 
 ## STEP 4 — Configure Environment Variables
@@ -65,12 +78,15 @@ These are used by GitHub Actions to push to Docker Hub securely.
 cp .env.example .env
 ```
 
-Open `.env` and replace the placeholder:
+Open `.env` and replace the placeholders:
 ```
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+ANTHROPIC_API_KEY=sk-ant-...        # optional — enables AIOps diagnosis
 ```
 
-Leave all other values as their defaults for now.
+Leave all other values as their defaults for now. `.env` is listed in `.gitignore` and `.dockerignore`, so it is never committed or baked into an image.
+
+> If your old `.env` contains `GEMINI_API_KEY`, delete that line — the project now uses the Claude API (`ANTHROPIC_API_KEY`).
 
 ---
 
@@ -147,22 +163,30 @@ Expected response from `/health`:
 # Install dependencies
 pip install -r app/requirements.txt
 
-# Run all 20 tests
+# Run all tests (app endpoints + AIOps diagnosis)
 pytest tests/ -v
+
+# Only the AIOps tests (parsing, redaction, API failures, timeouts, fallback)
+pytest tests/test_ai_diagnosis.py -v
 
 # Run with coverage report
 pytest tests/ -v --cov=app --cov-report=term-missing
 ```
 
-All 20 tests should pass with green output.
+All tests should pass with green output. The AIOps tests use fakes, so no API key, Docker daemon or internet connection is needed.
 
 ---
 
 ## STEP 9 — Start the Health Monitor
 
+> **Recommended:** `docker compose up -d --build` already runs the monitor as the `devops-monitor` container (with the Docker socket mounted). Follow its logs with `docker compose logs -f monitor`. The steps below are only for running the monitor directly on the host.
+
 Open a **second terminal window** and run:
 
 ```bash
+# Install monitor dependencies (Docker SDK + Anthropic SDK)
+pip install -r monitor/requirements.txt
+
 # Load environment variables (Windows PowerShell)
 Get-Content .env | ForEach-Object {
     if ($_ -match '^([^#][^=]*)=(.*)$') {
@@ -186,6 +210,7 @@ You should see:
 [INFO  ] Container name  : flask-devops-app
 [INFO  ] Check interval  : 10s
 [INFO  ] Discord alerts  : ENABLED
+[INFO  ] AIOps (Claude)  : ENABLED 🧠 model=claude-opus-5-5
 =================================================================
 
 [2026-09-21 21:00:00] [OK    ] ✅  HEALTHY — HTTP 200 | uptime=45.2s
@@ -215,16 +240,39 @@ Watch the **monitor terminal** — within 20 seconds you will see:
 [WARN  ] ⚠️  Check #1: UNHEALTHY — HTTP 503
 [WARN  ] ⚠️  Check #2: UNHEALTHY — HTTP 503
 [ERROR ] ❌  FAILURE DETECTED — HTTP 503 | status=UNHEALTHY
+[ACTION] 🔄  🧠 AIOps: collecting evidence and requesting Claude diagnosis (background)
 [ACTION] 🔄  Restarting container 'flask-devops-app' ...
-[OK    ] ✅  Container 'flask-devops-app' restart command accepted
+[OK    ] ✅  Container 'flask-devops-app' restarted successfully via Docker SDK
+[OK    ] ✅  Discord notification sent successfully
 [ACTION] 🔄  Waiting up to 60s for service to recover ...
+[OK    ] ✅  🧠 AIOps: diagnosis ready in 6.3s — severity=medium | The application's health flag ...
 [INFO  ] ℹ️   Recovery attempt #1 → HEALTHY (timeout in 55s)
-[OK    ] ✅  Service has RECOVERED successfully ✅
+[OK    ] ✅  Service has RECOVERED successfully ✅ (took 11.2s)
+[OK    ] ✅  Discord notification sent successfully
+[OK    ] ✅  Discord notification sent successfully
 ```
 
-Check Discord — you will receive three notifications:
+Note that the restart is issued straight away — the AI diagnosis runs in parallel.
+
+Check Discord — you will receive these notifications:
 1. 🚨 Service Failure Detected
 2. ✅ Service Recovered Successfully
+3. 🤖 AIOps Incident Report — severity, likely cause, supporting evidence, recommended action, final recovery status *(only when `ANTHROPIC_API_KEY` is set)*
+
+### STEP 10b — Prove that AI can never block recovery
+
+Set an invalid key (or a tiny timeout) and repeat Step 10:
+
+```bash
+# in .env
+ANTHROPIC_API_KEY=sk-ant-invalid
+# or: AI_TIMEOUT=0.1
+
+docker compose up -d monitor        # recreates the monitor with the new settings
+curl -X POST http://localhost:5000/simulate-failure
+```
+
+The restart and the standard alerts behave exactly the same; the AIOps embed says **"AI diagnosis unavailable"** with the reason (e.g. `AuthenticationError` or `Timed out after 0.1s`).
 
 ---
 
@@ -302,6 +350,13 @@ docker ps | grep flask-devops-app
 ### discord notification not sending
 - Check that `.env` has the correct `DISCORD_WEBHOOK_URL`
 - Make sure the environment is loaded before running the monitor
+
+### AIOps report missing or says "AI diagnosis unavailable"
+- Check the monitor banner: `AIOps (Claude) : ENABLED` means the key was picked up
+- `AuthenticationError` → wrong/revoked `ANTHROPIC_API_KEY`
+- `Timed out` → raise `AI_TIMEOUT` or lower `AI_EFFORT`
+- `No module named 'anthropic'` → rebuild the monitor image (`docker compose up -d --build monitor`) or `pip install -r monitor/requirements.txt`
+- Recovery and the standard alerts are unaffected in every case
 
 ### GitHub Actions failing at Docker push
 - Verify `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets are set correctly

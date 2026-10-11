@@ -10,11 +10,15 @@ WHAT THIS SCRIPT DOES:
   1. Periodically calls GET /health on the Flask container
   2. If HEALTHY  → logs OK, continues watching
   3. If UNHEALTHY (2 consecutive) →
-       a. Sends Discord "failure detected" alert
-       b. Issues `docker restart <container>`
-       c. Polls recovery (every 5s, up to RECOVERY_TIMEOUT)
-       d. Sends Discord "recovered" alert with recovery time
-       e. If restarts this session >= MAX_RESTARTS → sends escalation alert
+       a. Starts the AIOps diagnosis worker on a background thread
+          (ai_diagnosis.py — Claude API). It never blocks steps b–f.
+       b. Restarts the container immediately (Docker SDK)
+       c. Sends Discord "failure detected" alert
+       d. Polls recovery (every 5s, up to RECOVERY_TIMEOUT)
+       e. Sends Discord "recovered" / "recovery failed" alert
+       f. If restarts this session >= MAX_RESTARTS → sends escalation alert
+       g. Hands the recovery outcome to the AIOps worker, which then sends
+          an enhanced "AIOps Incident Report" embed (diagnosis + recovery)
   4. Tracks total restarts per session to detect persistent failures
 
 ENVIRONMENT VARIABLES (set in .env or docker-compose environment):
@@ -26,6 +30,8 @@ ENVIRONMENT VARIABLES (set in .env or docker-compose environment):
   CHECK_INTERVAL       – Seconds between health checks (default: 10)
   RECOVERY_TIMEOUT     – Max seconds to wait for recovery (default: 60)
   MAX_RESTARTS         – Restarts before escalation alert (default: 5)
+  ANTHROPIC_API_KEY    – Claude API key; enables AIOps diagnosis (optional)
+  (see ai_diagnosis.py for the other AI_* settings)
 
 USAGE:
   # On host:
@@ -43,8 +49,10 @@ import json
 import subprocess
 import urllib.request
 import urllib.error
+from collections import deque
 from datetime import datetime
-import google.generativeai as genai
+
+import ai_diagnosis
 
 
 # ─────────────────────────────────────────────
@@ -52,15 +60,11 @@ import google.generativeai as genai
 # ─────────────────────────────────────────────
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
-GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
 HEALTH_URL          = os.environ.get("HEALTH_URL", "http://localhost:5000/health")
 CONTAINER_NAME      = os.environ.get("CONTAINER_NAME", "flask-devops-app")
 CHECK_INTERVAL      = int(os.environ.get("CHECK_INTERVAL", "10"))
 RECOVERY_TIMEOUT    = int(os.environ.get("RECOVERY_TIMEOUT", "60"))
 MAX_RESTARTS        = int(os.environ.get("MAX_RESTARTS", "5"))
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 
 # ─────────────────────────────────────────────
@@ -68,6 +72,7 @@ if GEMINI_API_KEY:
 # ─────────────────────────────────────────────
 
 _session_restart_count = 0   # Total restarts issued in this monitoring session
+_restart_history = deque(maxlen=10)   # Recent restarts — evidence for AIOps diagnosis
 
 
 # ─────────────────────────────────────────────
@@ -93,13 +98,9 @@ def send_discord_notification(title: str, description: str, color: int) -> None:
     Send a rich embed message to Discord via webhook.
     color: Discord embed color integer (e.g. 0xFF0000 = red, 0x00FF00 = green)
     """
-    if not DISCORD_WEBHOOK_URL:
-        log("WARN", "DISCORD_WEBHOOK_URL not set — skipping Discord notification")
-        return
-
     color_label = {0xFF0000: "🔴", 0x00FF00: "🟢", 0xFF6600: "🟠", 0xFF0066: "🆘"}.get(color, "🔵")
 
-    payload = json.dumps({
+    send_discord_payload({
         "content": f"{color_label} **{title}**\n{description}\n_Container: `{CONTAINER_NAME}` • {timestamp()}_",
         "embeds": [{
             "title": title,
@@ -107,7 +108,21 @@ def send_discord_notification(title: str, description: str, color: int) -> None:
             "color": color,
             "footer": {"text": f"Container: {CONTAINER_NAME} • {timestamp()}"}
         }]
-    }).encode("utf-8")
+    })
+
+
+def send_discord_embed(embed: dict) -> None:
+    """Send a pre-built embed (used by the AIOps incident report)."""
+    send_discord_payload({"embeds": [embed]})
+
+
+def send_discord_payload(body: dict) -> None:
+    """POST a JSON payload to the Discord webhook. Never raises."""
+    if not DISCORD_WEBHOOK_URL:
+        log("WARN", "DISCORD_WEBHOOK_URL not set — skipping Discord notification")
+        return
+
+    payload = json.dumps(body).encode("utf-8")
 
     req = urllib.request.Request(
         DISCORD_WEBHOOK_URL,
@@ -243,44 +258,66 @@ def wait_for_recovery(timeout: int) -> bool:
 # Recovery flow
 # ─────────────────────────────────────────────
 
-def handle_failure(result: dict) -> None:
+def start_ai_diagnosis(failed_checks: list):
+    """
+    Launch the AIOps worker on a background thread and return it (or None).
+    Any problem here is logged and swallowed — recovery must never depend on AI.
+    """
+    if not ai_diagnosis.is_enabled():
+        return None
+    try:
+        return ai_diagnosis.IncidentDiagnosisWorker(
+            container_name=CONTAINER_NAME,
+            health_url=HEALTH_URL,
+            failed_checks=failed_checks,
+            restart_history=list(_restart_history),
+            notify=send_discord_embed,
+            log=log,
+            outcome_wait=RECOVERY_TIMEOUT + 60,
+            max_restarts=MAX_RESTARTS,
+        ).start()
+    except Exception as exc:
+        log("WARN", f"🧠 AIOps: could not start diagnosis (recovery unaffected): {exc}")
+        return None
+
+
+def _report_to_ai(worker, **outcome) -> None:
+    if worker is None:
+        return
+    try:
+        worker.report_recovery(restart_count=_session_restart_count, **outcome)
+    except Exception as exc:
+        log("WARN", f"🧠 AIOps: could not hand over recovery outcome: {exc}")
+
+
+def handle_failure(result: dict, failed_checks: list = None) -> None:
     """
     Full failure → restart → recovery → notification flow.
     Tracks restarts per session and sends escalation if threshold is exceeded.
+
+    AIOps diagnosis runs on a separate thread; this function never waits for it.
     """
     global _session_restart_count
 
     http_code = result.get("http_code")
     api_status = result.get("status")
     failure_detected_at = time.time()
+    failed_checks = failed_checks or [{
+        "timestamp": timestamp(), "http_code": http_code, "status": api_status,
+    }]
 
     log("ERROR", f"FAILURE DETECTED — HTTP {http_code} | status={api_status}")
 
-    # ── AIOps: Analyze logs ────────────────────────────────────────────────────
-    ai_diagnosis = "🤖 AIOps is disabled. Please set GEMINI_API_KEY in .env."
-    if GEMINI_API_KEY:
-        log("ACTION", f"🧠 AIOps: Fetching logs and analyzing failure with Google Gemini...")
-        try:
-            import docker as docker_sdk
-            client = docker_sdk.from_env()
-            container = client.containers.get(CONTAINER_NAME)
-            logs = container.logs(tail=50).decode("utf-8")
-            
-            prompt = (
-                "You are an expert DevOps AI assistant. A Docker container just failed. "
-                "Analyze these last 50 lines of logs and tell me exactly why it failed. "
-                "Keep your response under 3 sentences, be concise, and format it nicely for a Discord alert.\n\n"
-                f"LOGS:\n{logs}"
-            )
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(prompt)
-            log("OK", "🧠 AIOps: Diagnosis received from Gemini")
-            ai_diagnosis = f"🤖 **AIOps Diagnosis:**\n{response.text.strip()}"
-        except Exception as exc:
-            log("WARN", f"🧠 AIOps: Analysis failed: {exc}")
-            ai_diagnosis = f"🤖 AIOps Diagnosis failed: {exc}"
+    # Step 0: Start AIOps diagnosis in the background (returns immediately)
+    ai_worker = start_ai_diagnosis(failed_checks)
 
-    # Step 1: Notify Discord of failure detection
+    # Step 1: Restart the container IMMEDIATELY — deterministic, no AI involved
+    restarted = restart_container(CONTAINER_NAME)
+    restart_record = {"timestamp": timestamp(), "restart_succeeded": restarted,
+                      "trigger": f"HTTP {http_code} / {api_status}"}
+    _restart_history.append(restart_record)
+
+    # Step 2: Notify Discord of failure detection (standard alert, no AI dependency)
     send_discord_notification(
         title="🚨 Service Failure Detected",
         description=(
@@ -288,14 +325,13 @@ def handle_failure(result: dict) -> None:
             f"**Health URL:** `{HEALTH_URL}`\n"
             f"**HTTP Status:** `{http_code}`\n"
             f"**API Status:** `{api_status}`\n\n"
-            f"{ai_diagnosis}\n\n"
-            "⏳ Initiating automatic recovery ..."
+            + ("🔄 Automatic restart issued — verifying recovery ..." if restarted
+               else "❌ Automatic restart could not be issued.")
+            + ("\n🧠 AIOps diagnosis running in the background ..." if ai_worker else "")
         ),
         color=0xFF0000  # Red
     )
 
-    # Step 2: Restart the container
-    restarted = restart_container(CONTAINER_NAME)
     if not restarted:
         log("ERROR", "Could not restart container — manual intervention required")
         send_discord_notification(
@@ -307,6 +343,7 @@ def handle_failure(result: dict) -> None:
             ),
             color=0xFF0000
         )
+        _report_to_ai(ai_worker, restarted=False, recovered=False)
         return
 
     _session_restart_count += 1
@@ -315,6 +352,7 @@ def handle_failure(result: dict) -> None:
     # Step 3: Wait for recovery
     recovered = wait_for_recovery(RECOVERY_TIMEOUT)
     recovery_time = round(time.time() - failure_detected_at, 1)
+    restart_record.update(recovered=recovered, recovery_time_s=recovery_time)
 
     if recovered:
         log("OK", f"Service has RECOVERED successfully ✅ (took {recovery_time}s)")
@@ -359,6 +397,9 @@ def handle_failure(result: dict) -> None:
             color=0xFF0066  # Magenta/red
         )
 
+    # Step 5: Hand the outcome to the AIOps worker → it sends the incident report
+    _report_to_ai(ai_worker, restarted=True, recovered=recovered, recovery_time=recovery_time)
+
 
 # ─────────────────────────────────────────────
 # Main monitoring loop
@@ -375,11 +416,12 @@ def main() -> None:
     log("INFO", f"Recovery timeout : {RECOVERY_TIMEOUT}s")
     log("INFO", f"Max restarts     : {MAX_RESTARTS} (escalation threshold)")
     log("INFO", f"Discord alerts   : {'ENABLED' if DISCORD_WEBHOOK_URL else 'DISABLED (set DISCORD_WEBHOOK_URL)'}")
-    log("INFO", f"AIOps (Gemini)   : {'ENABLED 🧠' if GEMINI_API_KEY else 'DISABLED (set GEMINI_API_KEY)'}")
+    log("INFO", f"AIOps (Claude)   : {'ENABLED 🧠 model=' + ai_diagnosis.AI_MODEL if ai_diagnosis.is_enabled() else 'DISABLED (set ANTHROPIC_API_KEY)'}")
     print("=" * 65)
     print()
 
     consecutive_failures = 0
+    failed_checks = []   # timestamps + HTTP status of the current failure streak
 
     while True:
         result = check_health()
@@ -388,14 +430,18 @@ def main() -> None:
             uptime = result["body"].get("uptime_seconds", "?") if result["body"] else "?"
             log("OK", f"HEALTHY — HTTP 200 | uptime={uptime}s")
             consecutive_failures = 0
+            failed_checks = []
         else:
             consecutive_failures += 1
+            failed_checks.append({"timestamp": timestamp(), "http_code": result["http_code"],
+                                  "status": result["status"], "body": result["body"]})
             log("WARN", f"Check #{consecutive_failures}: {result['status']} — HTTP {result['http_code']}")
 
             if consecutive_failures >= 2:
                 # Two consecutive failures → trigger recovery flow
-                handle_failure(result)
+                handle_failure(result, failed_checks)
                 consecutive_failures = 0
+                failed_checks = []
 
         time.sleep(CHECK_INTERVAL)
 
