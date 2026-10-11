@@ -9,6 +9,9 @@
 #   the mounted socket (/var/run/docker.sock) using HTTP — no binary needed.
 #   This is the standard, production-grade pattern for sidecar containers
 #   that need to control sibling containers.
+#
+# AIOps: the `anthropic` SDK (Claude API) is also installed. It is only used by
+#   ai_diagnosis.py on a background thread; recovery never depends on it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim
@@ -18,10 +21,10 @@ WORKDIR /monitor
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install Docker Python SDK — communicates with daemon via socket, no CLI binary needed
+# Install Docker Python SDK (socket, no CLI binary needed) + Anthropic SDK (AIOps)
 COPY monitor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY monitor/monitor.py .
+COPY monitor/monitor.py monitor/ai_diagnosis.py ./
 
 CMD ["python", "-u", "monitor.py"]

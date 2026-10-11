@@ -10,6 +10,7 @@
 > - ✅ **CI/CD pipeline** (GitHub Actions → Docker Hub)
 > - ✅ **Health monitoring** script that detects failures and **auto-restarts** the container
 > - ✅ **Discord alerts** sent on failure and recovery
+> - ✅ **AIOps incident diagnosis** — Claude analyses logs + health/restart evidence and posts a structured diagnosis (cause, evidence, severity, remediation) to Discord, without ever delaying recovery
 
 ---
 
@@ -31,12 +32,12 @@ You should see `flask-devops-app` with status `Up`.
 ### Terminal 2 — Start the Monitor (with Discord alerts)
 ```powershell
 cd "C:\Users\Shloka Pol\OneDrive\Desktop\devops-labca"
-$env:DISCORD_WEBHOOK_URL = "YOUR_DISCORD_WEBHOOK_URL_HERE"
-python monitor/monitor.py
+docker compose logs -f monitor
 ```
 > [!IMPORTANT]
-> Replace `YOUR_DISCORD_WEBHOOK_URL_HERE` with your actual Discord webhook URL.
-> If you don't have one, you can still run the monitor — it will just skip Discord and log to the terminal.
+> The monitor reads `DISCORD_WEBHOOK_URL` and `ANTHROPIC_API_KEY` from `.env` (never paste them into commands or slides).
+> Without a webhook it just logs to the terminal; without an API key it skips the AIOps report.
+> Check the banner shows `AIOps (Claude) : ENABLED 🧠` before the demo.
 
 ---
 
@@ -95,6 +96,7 @@ Or in browser: visit `http://localhost:5000/health` — it will now return `UNHE
 4. Poll recovery attempts every 5 seconds
 5. Confirm `HEALTHY` once recovered
 6. Send **Discord notification** 🎉
+7. Post the **🤖 AIOps Incident Report** (diagnosis was running in the background the whole time)
 
 The terminal output during recovery looks like:
 ```
@@ -110,12 +112,32 @@ The terminal output during recovery looks like:
 
 ---
 
+### 🤖 Scene 3b: AIOps Incident Diagnosis (2 min)
+
+Switch to Discord and open the **🤖 AIOps Incident Report** embed. Point out:
+
+| Field | What it shows |
+|---|---|
+| Severity / Confidence | Colour-coded severity (low → critical) |
+| 🚨 Failure details | HTTP status, API status, first and confirming failed-check timestamps |
+| 🧠 Likely cause | Claude's root-cause hypothesis |
+| 🔎 Supporting evidence | Log lines / status codes it based the answer on |
+| 🛠️ Recommended action | Concrete remediation steps |
+| 🔁 Final recovery status | Recovered in Xs / not recovered / restart failed |
+
+**What to say:**
+> *"When the monitor confirms a failure, it restarts the container immediately — that path is fully deterministic. In parallel, a background worker collects the last 100 log lines, container state, HTTP status, timestamps and restart history, redacts any secrets, and asks Claude for a structured diagnosis. The AI is advisory only: it can't trigger or delay a restart."*
+
+**Optional — prove the fallback (1 min):** set `AI_TIMEOUT=0.1` in `.env`, run `docker compose up -d monitor`, and trigger the failure again. Recovery and the standard alerts are identical; the AIOps embed now says **"AI diagnosis unavailable — Timed out"**. Set it back to `30` afterwards.
+
+---
+
 ### 🟡 Scene 4: Show GitHub Actions CI/CD (2 min)
 
 Open GitHub → your repo → **Actions tab**
 
 Show the pipeline stages:
-1. ✅ **Run Tests & Smoke Test** — runs all 26 pytest cases + live integration smoke test
+1. ✅ **Run Tests & Smoke Test** — runs the full pytest suite (app + AIOps) + live integration smoke test
 2. ✅ **Build & Push Docker Image** — only runs if tests pass, pushes to Docker Hub
 
 **What to say:**
@@ -131,12 +153,14 @@ cd "C:\Users\Shloka Pol\OneDrive\Desktop\devops-labca"
 pytest tests/ -v
 ```
 
-Output shows 26 tests across 5 classes:
-- `TestIndexEndpoint` (5 tests)
-- `TestHealthEndpoint` (5 tests)
-- `TestSimulateFailureEndpoint` (6 tests)
-- `TestResetEndpoint` (4 tests)
-- `TestMetricsEndpoint` (6 tests — covers Prometheus /metrics endpoint)
+Output shows 80 tests:
+- `tests/test_app.py` — 26 tests across 5 classes:
+  - `TestIndexEndpoint` (5 tests)
+  - `TestHealthEndpoint` (5 tests)
+  - `TestSimulateFailureEndpoint` (6 tests)
+  - `TestResetEndpoint` (4 tests)
+  - `TestMetricsEndpoint` (6 tests — covers Prometheus /metrics endpoint)
+- `tests/test_ai_diagnosis.py` — 54 AIOps tests: diagnosis parsing, secret redaction, API failures, refusals, timeouts, fallback embed, background worker, and *"slow AI never delays the restart"*
 
 **What to say:**
 > *"We have 26 automated test cases covering every endpoint and scenario — including the failure simulation, recovery flow, and the Prometheus metrics endpoint. CI also enforces a minimum 80% code coverage threshold. These run automatically in GitHub Actions on every push."*
@@ -159,7 +183,10 @@ docker compose down
 | *What if Docker itself crashes?* | The monitor would log `UNREACHABLE` — a production system would use orchestration like Kubernetes |
 | *Why Discord alerts?* | In production, you'd use PagerDuty or Slack. Discord is free and instant for demo purposes |
 | *Why not just use Docker's own restart policy?* | Docker's `restart: unless-stopped` just restarts — our monitor adds *detection*, *notification*, and *recovery verification* |
-| *What does the CI/CD pipeline gate?* | The Docker image is only pushed if ALL 15 tests pass — broken code never reaches Docker Hub |
+| *What does the CI/CD pipeline gate?* | The Docker image is only pushed if ALL tests pass — broken code never reaches Docker Hub |
+| *What if the AI is wrong or the API is down?* | The AI never decides anything — the restart is deterministic and happens first. API errors/timeouts just produce an "AI diagnosis unavailable" note |
+| *Do you send secrets to the AI?* | No — logs are redacted (API keys, tokens, webhook URLs, passwords, e-mails) before they leave the host, and `.env` is never committed |
+| *Why Claude and not a rule-based classifier?* | Log messages are free text; an LLM can correlate log lines, status codes and restart history into a readable root-cause hypothesis. Structured JSON output keeps it machine-checkable |
 
 ---
 
@@ -180,6 +207,12 @@ Invoke-WebRequest http://localhost:5000/metrics | Select-Object -ExpandProperty 
 
 # Trigger failure
 Invoke-WebRequest -Uri http://localhost:5000/simulate-failure -Method POST
+
+# Watch monitor + AIOps logs
+docker compose logs -f monitor
+
+# Run only the AIOps tests
+pytest tests/test_ai_diagnosis.py -v
 
 # Reset manually (without restart)
 Invoke-WebRequest -Uri http://localhost:5000/reset -Method POST
